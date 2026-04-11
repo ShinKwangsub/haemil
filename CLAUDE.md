@@ -5,8 +5,13 @@
 핵심 장점을 통합하여 상용 AI 비즈니스 파트너 제품을 만드는 프로젝트.
 
 ## 현재 단계
-Phase 1: 각 플랫폼 상세 소스 분석 ✅ 완료 (2026-04-10)
-Phase 2: 컴포넌트 추출 확정 + 인터페이스 설계 (다음)
+- **Phase 1**: 각 플랫폼 상세 소스 분석 ✅ 완료 (2026-04-10)
+- **Phase 2**: 통합 엔진 뼈대 🚧 진행 중
+  - **Phase 2a**: Go 스텁 (컴파일 + 테스트 + 설계 문서) ✅ 완료 (2026-04-11)
+  - **Phase 2b**: 본문 구현 (SSE 파싱, bash 실행, 턴 루프, REPL) 🔜 다음 세션
+- **Phase 3**: 컴포넌트 추출 (7개 플랫폼 통합) — 예정
+
+**다음 세션 시작 시 읽을 것**: `analysis/integration/skeleton.md`
 
 ## 기술 스택 (확정)
 - 코어 엔진: Go
@@ -17,13 +22,34 @@ Phase 2: 컴포넌트 추출 확정 + 인터페이스 설계 (다음)
 - 세션 저장: JSONL (append-only)
 
 ## 디렉토리 구조
-- `analysis/platforms/` — 7개 플랫폼 상세 분석 (동일 템플릿, 전부 완료)
+
+### Go 코드 (Phase 2)
+- `cmd/haemil/main.go` — CLI 엔트리포인트 (flag 파싱 + 시그널 + cli.Run)
+- `internal/runtime/` — 도메인 타입 + Provider/Tool 인터페이스 (consumer defines interface)
+  - `message.go` — Role, ContentBlock, Message, ChatRequest/Response, Provider, Tool
+  - `session.go` — JSONL append-only 세션 저장
+  - `conversation.go` — Runtime, Options, TurnSummary, RunTurn (턴 루프)
+- `internal/provider/` — LLM 백엔드 구현
+  - `provider.go` — New 팩토리 + RedactAPIKey
+  - `anthropic.go` — raw net/http 기반 Anthropic 클라이언트 + sseScanner
+- `internal/tools/` — 도구 구현
+  - `tool.go` — Default() 레지스트리
+  - `bash.go` — BashTool + BLOCKED_PATTERNS
+- `internal/cli/` — REPL 조립 + 입력 루프
+  - `repl.go` — Run(ctx, cfg) 조립 함수
+
+**임포트 그래프**: `main → cli → runtime/provider/tools`. provider, tools 는 둘 다 runtime 을 쓰지만 **서로는 모른다**.
+
+### 분석/설계 문서
+- `analysis/platforms/` — 7개 플랫폼 상세 분석 (동일 템플릿, Phase 1)
   - claw-code.md (451줄), goclaw.md (323줄), hermes.md (282줄)
   - goose.md (298줄), paperclip.md (319줄), openclaw.md (351줄), autoagent.md (256줄)
-- `analysis/integration/` — 컴포넌트 추출, 인터페이스 설계, 조립 설계도 (작성 예정)
+- `analysis/integration/` — 통합 설계 문서
+  - `skeleton.md` — Phase 2 코어 엔진 뼈대 설계서 (다음 세션 입력)
+  - `multi-agent-communication.md` — Phase 3 멀티 에이전트 통신 (3계층: 태스크/이벤트/Advisor)
 - `analysis/` — 기존 패턴 분석 (하네스, 압축, 복구)
 - `plan/` — 설계서 + 구현 로드맵
-- `reference/` — 7개 플랫폼 소스 전부 클론됨
+- `reference/` — 7개 플랫폼 소스 전부 클론됨 (`.gitignore` 처리, ~1.6GB 로컬 전용)
   - claw-code/ (78 Rust 파일, 75K줄), goclaw/ (1,232 Go 파일)
   - hermes/ (777 Python 파일), goose/ (562 Rust 파일)
   - paperclip/ (842 TS 파일), openclaw/ (10,894 TS 파일)
