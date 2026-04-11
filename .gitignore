@@ -6,9 +6,9 @@
 # Reference sources (7 open-source platforms — cloned locally, ~1.6GB)
 reference/
 
-# Build artifacts
-haemil
-haemil.exe
+# Build artifacts — anchored with leading slash so cmd/haemil/ is NOT ignored
+/haemil
+/haemil.exe
 *.exe
 /dist/
 /build/
