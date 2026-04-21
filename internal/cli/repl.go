@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ShinKwangsub/haemil/internal/mcp"
 	"github.com/ShinKwangsub/haemil/internal/provider"
 	"github.com/ShinKwangsub/haemil/internal/runtime"
 	"github.com/ShinKwangsub/haemil/internal/tools"
@@ -26,6 +27,7 @@ type Config struct {
 	SessionDir     string // where JSONL session files live
 	ResumeID       string // if non-empty, OpenSession instead of NewSession
 	PermissionMode string // "readonly" | "workspace-write" | "danger-full" (default danger-full)
+	MCPConfigPath  string // path to mcp.json; empty = default (~/.haemil/mcp.json)
 
 	// Stdin / Stdout / Stderr allow tests to inject. If nil, os.Stdin/out/err.
 	Stdin  io.Reader
@@ -92,6 +94,24 @@ func Run(ctx context.Context, cfg Config) error {
 	workspace, _ := os.Getwd()
 	toolList := tools.Default(mode, workspace)
 
+	// 4b. MCP registry (C7). Failures on individual servers are logged and
+	// skipped; a missing config file is fine. The registry's Close is
+	// deferred to this function's return so long-lived servers live for
+	// the lifetime of the REPL.
+	mcpPath := cfg.MCPConfigPath
+	if mcpPath == "" {
+		mcpPath = mcp.DefaultConfigPath()
+	}
+	mcpCfg, mcpErr := mcp.LoadConfig(mcpPath)
+	if mcpErr != nil {
+		fmt.Fprintf(cfg.Stderr, "warning: mcp config: %v\n", mcpErr)
+	}
+	mcpReg := mcp.BootstrapFromConfig(ctx, mcpCfg)
+	defer mcpReg.Close()
+	if len(mcpReg.Tools) > 0 {
+		toolList = append(toolList, mcpReg.Tools...)
+	}
+
 	// 5. Runtime.
 	rt := runtime.New(p, toolList, session, runtime.Options{
 		Model:         cfg.Model,
@@ -103,6 +123,10 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// 6. Greeting + REPL.
 	fmt.Fprintf(cfg.Stdout, "haemil — Phase 2b REPL (session %s, mode %s)\n", session.ID(), mode)
+	if len(mcpReg.Servers) > 0 {
+		fmt.Fprintf(cfg.Stdout, "mcp: %d server(s) connected, %d tool(s) registered\n",
+			len(mcpReg.Servers), len(mcpReg.Tools))
+	}
 	fmt.Fprintln(cfg.Stdout, "type /exit to quit, /help for commands")
 	fmt.Fprintln(cfg.Stdout)
 
