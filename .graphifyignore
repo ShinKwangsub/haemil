@@ -1,0 +1,64 @@
+# Graphify ignore patterns (same syntax as .gitignore).
+# Files and folders listed here are skipped during graph extraction.
+
+# 7 reference platforms — ~1.6GB / hundreds of thousands of files.
+# Analyzing these would burn huge subagent costs; we already have
+# analysis/platforms/*.md summaries of each.
+reference/
+
+# Graphify's own cache and outputs — skip to avoid re-analyzing results.
+graphify-out/cache/
+
+# Version control and local config
+.git/
+.gitignore
+
+# Session data (runtime-only)
+.haemil/
+~/.haemil/
+
+# Build artifacts
+/haemil
+/haemil.exe
+*.exe
+/dist/
+/build/
+/bin/
+/tmp/
+
+# Go
+*.test
+*.out
+vendor/
+
+# Node / TypeScript
+node_modules/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Secrets
+.env
+.env.*
+!.env.example
