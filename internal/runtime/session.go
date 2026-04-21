@@ -32,9 +32,29 @@ type Session struct {
 }
 
 // sessionLine is the wire shape of one JSONL record.
+//
+// A record is EITHER a Message append OR a Compact marker (never both):
+//
+//	{"ts":"...","message":{"role":"user","content":[...]}}
+//	{"ts":"...","compact":{"messages":[...],"summary":"...","removed":12}}
+//
+// On replay, a compact record resets the in-memory message list to its
+// Messages field, then replay continues reading subsequent lines (which
+// are appended to the post-compaction state). This lets compaction persist
+// across reload without ever rewriting the JSONL.
 type sessionLine struct {
-	TS      string  `json:"ts"`
-	Message Message `json:"message"`
+	TS      string         `json:"ts"`
+	Message *Message       `json:"message,omitempty"`
+	Compact *compactRecord `json:"compact,omitempty"`
+}
+
+// compactRecord is the payload of a compaction marker line. Messages holds
+// the post-compaction state (continuation system message + preserved tail);
+// Summary and Removed are for diagnostics only.
+type compactRecord struct {
+	Messages []Message `json:"messages"`
+	Summary  string    `json:"summary,omitempty"`
+	Removed  int       `json:"removed,omitempty"`
 }
 
 // ID returns the session identifier (16 hex chars, ~8 bytes of entropy).
@@ -131,7 +151,15 @@ func replaySession(path string) ([]Message, error) {
 			fmt.Fprintf(os.Stderr, "session: skipping corrupt line %d in %s: %v\n", lineNo, path, err)
 			continue
 		}
-		msgs = append(msgs, rec.Message)
+		switch {
+		case rec.Compact != nil:
+			// Compaction marker: reset to the post-compaction state.
+			msgs = append(msgs[:0], rec.Compact.Messages...)
+		case rec.Message != nil:
+			msgs = append(msgs, *rec.Message)
+		default:
+			fmt.Fprintf(os.Stderr, "session: skipping empty line %d in %s\n", lineNo, path)
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
@@ -162,8 +190,49 @@ func (s *Session) append(msg Message) error {
 	}
 	rec := sessionLine{
 		TS:      time.Now().UTC().Format(time.RFC3339Nano),
-		Message: msg,
+		Message: &msg,
 	}
+	if err := s.writeRecord(rec); err != nil {
+		return err
+	}
+	s.msgs = append(s.msgs, msg)
+	return nil
+}
+
+// ApplyCompaction persists a CompactionResult: writes a compaction marker
+// record to the JSONL and replaces the in-memory message list.
+//
+// Callers typically pass the output of runtime.Compact() directly. This
+// does NOT verify that result.Messages is actually shorter than the
+// current session — it's the caller's responsibility to only apply a
+// compaction that actually happened (RemovedCount > 0 for the common case).
+func (s *Session) ApplyCompaction(result CompactionResult) error {
+	if s == nil || s.file == nil {
+		return errors.New("session: closed")
+	}
+	// Defensive copy — we don't want the on-disk state to alias memory that
+	// the caller may mutate.
+	msgs := make([]Message, len(result.Messages))
+	copy(msgs, result.Messages)
+
+	rec := sessionLine{
+		TS: time.Now().UTC().Format(time.RFC3339Nano),
+		Compact: &compactRecord{
+			Messages: msgs,
+			Summary:  result.Summary,
+			Removed:  result.RemovedCount,
+		},
+	}
+	if err := s.writeRecord(rec); err != nil {
+		return err
+	}
+	s.msgs = msgs
+	return nil
+}
+
+// writeRecord marshals a sessionLine, writes it with a trailing newline,
+// and fsyncs the file.
+func (s *Session) writeRecord(rec sessionLine) error {
 	buf, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("session: marshal: %w", err)
@@ -172,11 +241,9 @@ func (s *Session) append(msg Message) error {
 	if _, err := s.file.Write(buf); err != nil {
 		return fmt.Errorf("session: write: %w", err)
 	}
-	// Phase 2 policy: fsync after every append — safety over performance.
 	if err := s.file.Sync(); err != nil {
 		return fmt.Errorf("session: fsync: %w", err)
 	}
-	s.msgs = append(s.msgs, msg)
 	return nil
 }
 

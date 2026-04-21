@@ -15,8 +15,9 @@
   - **C4 멀티 프로바이더** ✅ 완료 (2026-04-22, 앞당김) — OpenAI-compat (oMLX/OpenAI/로컬)
   - **C2 권한 모드** ✅ 완료 (2026-04-22) — readonly / workspace-write / danger-full (기본)
   - **C3 bash 검증** ✅ 완료 (2026-04-22) — CommandIntent 분류 + 4단계 파이프라인 (Mode/Sed/Destructive/Paths)
-  - **C5 세션 압축** 🔜 다음 사이클 후보
-  - C6~C16 — 대기
+  - **C5 세션 압축** ✅ 완료 (2026-04-22) — 템플릿 기반 요약 (LLM 호출 없음), tool 쌍 경계 보호, `/compact` 명령, JSONL compaction marker
+  - **C6 Hook** 🔜 다음 사이클 후보
+  - C7~C16 — 대기
 
 **다음 세션 시작 시 읽을 것**:
 1. `CLAUDE.md` (이 파일) — 전체 맥락
@@ -35,13 +36,13 @@
   - danger-full → 전부 허용 (현재 동작)
 - JSONL 세션 저장 `~/.haemil/sessions/<id>.jsonl` (0700 dir / 0600 file)
 - `-session <id>` 플래그로 이전 세션 replay
-- 슬래시 명령: `/exit`, `/help`
+- 슬래시 명령: `/exit`, `/help`, `/compact` (C5)
 
 ## 검증 상태
-- `go build ./...` / `go vet ./...` / `go test ./...` — **94 테스트 PASS / 0 FAIL** (C3 에서 +12)
-- E2E C1~C4 완료: oMLX/gemma4 + 6개 도구 전부 실호출 + 권한 모드 + bash 검증
-- E2E C3 완료 (2026-04-22): danger-full + `mkdir x && rm -rf x` → `[warning] Recursive forced deletion...` prefix + 실행 성공. `cat ../../etc/hosts` → traversal warn
-- 커밋: `d28d98b` (C2), `c0dea5d` (C1 file_ops), `8cff014` (OpenAI provider), `7190178` (Phase 2b), `5eec0dd` (docs), `cb7fb66` (Phase 2a), `120f67e` (Graphify), `a1e42d4` (initial)
+- `go build ./...` / `go vet ./...` / `go test ./...` — **106 테스트 PASS / 0 FAIL** (C5 에서 +12)
+- E2E C1~C5 완료: oMLX/gemma4 + 6개 도구 + 권한 모드 + bash 검증 + `/compact` 슬래시
+- E2E C5 완료 (2026-04-22): REPL `/compact` → 임계값 아래일 때 "below threshold" skip 메시지. JSONL marker 라인 replay 는 `TestSessionApplyCompactionRoundtrip` 가 검증
+- 커밋: `79d96fc` (C3), `d28d98b` (C2), `c0dea5d` (C1 file_ops), `8cff014` (OpenAI provider), `7190178` (Phase 2b), `5eec0dd` (docs), `cb7fb66` (Phase 2a), `120f67e` (Graphify), `a1e42d4` (initial)
 
 ## 기술 스택 (확정)
 - 코어 엔진: Go
@@ -57,9 +58,10 @@
 - `cmd/haemil/main.go` — CLI 엔트리포인트, flag 파싱 (`-provider`, `-model`, `-endpoint`, `-session`, `-permission-mode`, ...)
 - `internal/runtime/` — 도메인 타입 + Provider/Tool 인터페이스 (consumer defines interface)
   - `message.go` — Role, ContentBlock, Message, ChatRequest/Response, Provider, Tool
-  - `session.go` — JSONL append-only 세션 저장 + replay (bufio.Scanner, 손상 줄 skip)
+  - `session.go` — JSONL append-only + replay + compaction marker (ApplyCompaction)
   - `conversation.go` — Runtime, Options, TurnSummary, RunTurn (Policy 게이트 내장)
   - `permissions.go` — Capability / PermissionMode / Policy / Authorize (C2)
+  - `compact.go` — CompactionConfig / ShouldCompact / Compact + 템플릿 요약 + 쌍 경계 보호 (C5)
 - `internal/provider/` — LLM 백엔드 구현
   - `provider.go` — New(name, apiKey, model, Options) 팩토리 + RedactAPIKey
   - `anthropic.go` — Anthropic Messages API (Bearer `x-api-key`, 13 함정 준수)

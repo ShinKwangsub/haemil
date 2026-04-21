@@ -197,20 +197,51 @@ func isSlashCommand(line string) bool {
 }
 
 // handleSlash returns true if the REPL should exit.
-func handleSlash(cfg Config, _ *runtime.Runtime, line string) bool {
+func handleSlash(cfg Config, rt *runtime.Runtime, line string) bool {
 	switch line {
 	case "/exit", "/quit":
 		fmt.Fprintln(cfg.Stdout, "bye.")
 		return true
 	case "/help":
 		fmt.Fprintln(cfg.Stdout, "commands:")
-		fmt.Fprintln(cfg.Stdout, "  /exit  — quit")
-		fmt.Fprintln(cfg.Stdout, "  /help  — this message")
+		fmt.Fprintln(cfg.Stdout, "  /exit     — quit")
+		fmt.Fprintln(cfg.Stdout, "  /help     — this message")
+		fmt.Fprintln(cfg.Stdout, "  /compact  — summarise older messages, preserve the recent tail")
+		return false
+	case "/compact":
+		handleCompact(cfg, rt)
 		return false
 	default:
 		fmt.Fprintf(cfg.Stdout, "unknown command: %s (try /help)\n", line)
 		return false
 	}
+}
+
+// handleCompact invokes runtime.Compact on the active session and persists
+// the result. No-op (with a friendly note) if no session is wired or the
+// current history is already below threshold.
+func handleCompact(cfg Config, rt *runtime.Runtime) {
+	sess := rt.Session()
+	if sess == nil {
+		fmt.Fprintln(cfg.Stdout, "compact: no session wired — nothing to compact.")
+		return
+	}
+	before := sess.Messages()
+	beforeTokens := runtime.EstimateSessionTokens(before)
+	cfgC := runtime.DefaultCompactionConfig()
+	result := runtime.Compact(before, cfgC)
+	if result.RemovedCount == 0 {
+		fmt.Fprintf(cfg.Stdout, "compact: skipped (%d messages, ~%d tokens — below threshold: preserve=%d, max=%d)\n",
+			len(before), beforeTokens, cfgC.PreserveRecent, cfgC.MaxEstimatedTokens)
+		return
+	}
+	if err := sess.ApplyCompaction(result); err != nil {
+		fmt.Fprintf(cfg.Stderr, "compact: apply failed: %v\n", err)
+		return
+	}
+	afterTokens := runtime.EstimateSessionTokens(result.Messages)
+	fmt.Fprintf(cfg.Stdout, "compact: %d → %d messages, ~%d → ~%d tokens (removed %d)\n",
+		len(before), len(result.Messages), beforeTokens, afterTokens, result.RemovedCount)
 }
 
 // renderSummary prints the assistant messages and tool call records in a

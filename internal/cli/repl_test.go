@@ -191,6 +191,65 @@ func TestIsSlashCommand(t *testing.T) {
 	}
 }
 
+// TestREPLCompactBelowThreshold: /compact on a short session prints the
+// "skipped" message and does not mutate the in-memory list.
+func TestREPLCompactBelowThreshold(t *testing.T) {
+	provider := &fakeProvider{responses: []*runtime.ChatResponse{}}
+	dir := t.TempDir()
+	sess, _ := runtime.NewSession(dir)
+	defer sess.Close()
+	// Two-message session, well below any threshold.
+	_ = sess.AppendUser(runtime.Message{Role: runtime.RoleUser, Content: []runtime.ContentBlock{{Type: runtime.BlockTypeText, Text: "hi"}}})
+	_ = sess.AppendAssistant(runtime.Message{Role: runtime.RoleAssistant, Content: []runtime.ContentBlock{{Type: runtime.BlockTypeText, Text: "hello"}}})
+	before := len(sess.Messages())
+
+	rt := runtime.New(provider, nil, sess, runtime.Options{MaxIterations: 10, MaxTokens: 1024})
+
+	stdin := strings.NewReader("/compact\n/exit\n")
+	var stdout, stderr bytes.Buffer
+	cfg := Config{Stdin: stdin, Stdout: &stdout, Stderr: &stderr}
+
+	_ = runREPL(context.Background(), cfg, rt)
+	out := stdout.String()
+	if !strings.Contains(out, "below threshold") {
+		t.Errorf("expected 'below threshold' skip note, got %q", out)
+	}
+	after := len(sess.Messages())
+	if after != before {
+		t.Errorf("message count changed: got %d, want %d (no compaction should occur)", after, before)
+	}
+}
+
+// TestREPLCompactAboveThreshold: a verbose session crosses the claw-code
+// default (~10k tokens). /compact should report a reduction.
+func TestREPLCompactAboveThreshold(t *testing.T) {
+	provider := &fakeProvider{responses: []*runtime.ChatResponse{}}
+	dir := t.TempDir()
+	sess, _ := runtime.NewSession(dir)
+	defer sess.Close()
+	// ~5k chars per message × 8 messages = ~10k tokens.
+	blob := strings.Repeat("x", 5000)
+	for i := 0; i < 4; i++ {
+		_ = sess.AppendUser(runtime.Message{Role: runtime.RoleUser, Content: []runtime.ContentBlock{{Type: runtime.BlockTypeText, Text: "u " + blob}}})
+		_ = sess.AppendAssistant(runtime.Message{Role: runtime.RoleAssistant, Content: []runtime.ContentBlock{{Type: runtime.BlockTypeText, Text: "a " + blob}}})
+	}
+	rt := runtime.New(provider, nil, sess, runtime.Options{MaxIterations: 10, MaxTokens: 1024})
+
+	stdin := strings.NewReader("/compact\n/exit\n")
+	var stdout, stderr bytes.Buffer
+	cfg := Config{Stdin: stdin, Stdout: &stdout, Stderr: &stderr}
+
+	_ = runREPL(context.Background(), cfg, rt)
+	out := stdout.String()
+	if !strings.Contains(out, "removed") {
+		t.Errorf("expected compact summary mentioning 'removed', got %q", out)
+	}
+	// After compaction the in-memory list should be shorter than 8.
+	if got := len(sess.Messages()); got >= 8 {
+		t.Errorf("post-compact len: got %d, expected < 8", got)
+	}
+}
+
 // TestREPLUnknownSlash verifies /foo prints unknown-command hint.
 func TestREPLUnknownSlash(t *testing.T) {
 	provider := &fakeProvider{responses: []*runtime.ChatResponse{}}
