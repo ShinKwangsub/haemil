@@ -56,6 +56,9 @@ func NewEditFile() *EditFileTool {
 
 func (t *EditFileTool) Spec() runtime.ToolSpec { return t.spec }
 
+// Capability classifies edit_file as a workspace write.
+func (t *EditFileTool) Capability() runtime.Capability { return runtime.CapWrite }
+
 func (t *EditFileTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	if len(input) == 0 {
 		return "", errFileEmptyPath

@@ -18,13 +18,14 @@ import (
 
 // Config carries the knobs cmd/haemil/main.go parsed from flags and env.
 type Config struct {
-	ProviderName  string // e.g. "anthropic" or "openai"
-	APIKey        string // raw key, already loaded from env — may be empty
-	Model         string // e.g. "claude-sonnet-4-6" or "gemma-4-26b-a4b-it-8bit"
-	Endpoint      string // override provider base URL (e.g. http://127.0.0.1:8080 for oMLX)
-	MaxIterations int    // cap on tool loop rounds
-	SessionDir    string // where JSONL session files live
-	ResumeID      string // if non-empty, OpenSession instead of NewSession
+	ProviderName   string // e.g. "anthropic" or "openai"
+	APIKey         string // raw key, already loaded from env — may be empty
+	Model          string // e.g. "claude-sonnet-4-6" or "gemma-4-26b-a4b-it-8bit"
+	Endpoint       string // override provider base URL (e.g. http://127.0.0.1:8080 for oMLX)
+	MaxIterations  int    // cap on tool loop rounds
+	SessionDir     string // where JSONL session files live
+	ResumeID       string // if non-empty, OpenSession instead of NewSession
+	PermissionMode string // "readonly" | "workspace-write" | "danger-full" (default danger-full)
 
 	// Stdin / Stdout / Stderr allow tests to inject. If nil, os.Stdin/out/err.
 	Stdin  io.Reader
@@ -78,16 +79,28 @@ func Run(ctx context.Context, cfg Config) error {
 	// 3. Tools.
 	toolList := tools.Default()
 
-	// 4. Runtime.
+	// 4. Policy (C2 권한 모드).
+	modeStr := cfg.PermissionMode
+	if modeStr == "" {
+		modeStr = "danger-full"
+	}
+	mode, err := runtime.ParseMode(modeStr)
+	if err != nil {
+		return fmt.Errorf("cli: permission-mode: %w", err)
+	}
+	policy := runtime.NewPolicy(mode, nil)
+
+	// 5. Runtime.
 	rt := runtime.New(p, toolList, session, runtime.Options{
 		Model:         cfg.Model,
 		MaxIterations: cfg.MaxIterations,
 		SystemPrompt:  systemPrompt,
 		MaxTokens:     4096,
+		Policy:        policy,
 	})
 
-	// 5. Greeting + REPL.
-	fmt.Fprintf(cfg.Stdout, "haemil — Phase 2b REPL (session %s)\n", session.ID())
+	// 6. Greeting + REPL.
+	fmt.Fprintf(cfg.Stdout, "haemil — Phase 2b REPL (session %s, mode %s)\n", session.ID(), mode)
 	fmt.Fprintln(cfg.Stdout, "type /exit to quit, /help for commands")
 	fmt.Fprintln(cfg.Stdout)
 

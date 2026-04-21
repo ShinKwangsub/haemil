@@ -290,6 +290,81 @@ func TestRunTurnProviderError(t *testing.T) {
 	}
 }
 
+// TestRunTurnPermissionDenied: Policy denies the tool call → tool_result
+// carries is_error=true + permission_denied reason, and the loop recovers
+// on the next provider round (same pattern as TestRunTurnUnknownTool).
+func TestRunTurnPermissionDenied(t *testing.T) {
+	// Register a CapExec-declaring tool so a ReadOnly policy blocks it.
+	var executed int32
+	blockedTool := &capTool{
+		name: "danger_tool",
+		cap:  CapExec,
+		run: func(_ context.Context, _ json.RawMessage) (string, error) {
+			atomic.AddInt32(&executed, 1)
+			return "should not run", nil
+		},
+	}
+
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*ChatResponse{
+			{
+				Content: []ContentBlock{
+					{Type: BlockTypeToolUse, ID: "toolu_1", Name: "danger_tool", Input: json.RawMessage(`{}`)},
+				},
+				StopReason: "tool_use",
+			},
+			{
+				Content: []ContentBlock{
+					{Type: BlockTypeText, Text: "understood — won't do that"},
+				},
+				StopReason: "end_turn",
+			},
+		},
+	}
+
+	policy := NewPolicy(ModeReadOnly, nil)
+	rt := New(provider, []Tool{blockedTool}, nil, Options{
+		MaxIterations: 10, MaxTokens: 1024, Policy: policy,
+	})
+
+	summary, err := rt.RunTurn(context.Background(), "try it")
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if atomic.LoadInt32(&executed) != 0 {
+		t.Errorf("blocked tool should NOT have executed; ran %d times", executed)
+	}
+	if len(summary.ToolCalls) != 1 {
+		t.Fatalf("tool calls: got %d, want 1", len(summary.ToolCalls))
+	}
+	tc := summary.ToolCalls[0]
+	if !tc.IsError {
+		t.Error("denied tool call should be marked IsError")
+	}
+	if !strings.Contains(tc.Output, "permission_denied") {
+		t.Errorf("output should mention permission_denied, got %q", tc.Output)
+	}
+	if summary.StopReason != "end_turn" {
+		t.Errorf("final stop_reason: got %q, want end_turn (should recover)", summary.StopReason)
+	}
+}
+
+// capTool is a fakeTool that also advertises a Capability.
+type capTool struct {
+	name string
+	cap  Capability
+	run  func(ctx context.Context, input json.RawMessage) (string, error)
+}
+
+func (t *capTool) Spec() ToolSpec {
+	return ToolSpec{Name: t.name, Description: "cap tool", InputSchema: json.RawMessage(`{"type":"object"}`)}
+}
+func (t *capTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
+	return t.run(ctx, input)
+}
+func (t *capTool) Capability() Capability { return t.cap }
+
 // TestRunTurnWithSession: session is wired — user + assistant messages
 // are actually appended and match Messages().
 func TestRunTurnWithSession(t *testing.T) {

@@ -55,6 +55,9 @@ func NewReadFile() *ReadFileTool {
 
 func (t *ReadFileTool) Spec() runtime.ToolSpec { return t.spec }
 
+// Capability classifies read_file as a pure read.
+func (t *ReadFileTool) Capability() runtime.Capability { return runtime.CapRead }
+
 func (t *ReadFileTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	if len(input) == 0 {
 		return "", errFileEmptyPath

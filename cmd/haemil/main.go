@@ -20,9 +20,10 @@ func main() {
 		providerName  = flag.String("provider", "anthropic", "LLM provider: anthropic | openai | omlx")
 		model         = flag.String("model", "", "LLM model identifier (default depends on provider)")
 		endpoint      = flag.String("endpoint", "", "override provider base URL (e.g. http://127.0.0.1:8080 for oMLX)")
-		maxIterations = flag.Int("max-iterations", 10, "max tool-use rounds per turn")
-		sessionDir    = flag.String("session-dir", "", "session directory (default ~/.haemil/sessions)")
-		resumeID      = flag.String("session", "", "resume an existing session by id")
+		maxIterations  = flag.Int("max-iterations", 10, "max tool-use rounds per turn")
+		sessionDir     = flag.String("session-dir", "", "session directory (default ~/.haemil/sessions)")
+		resumeID       = flag.String("session", "", "resume an existing session by id")
+		permissionMode = flag.String("permission-mode", "danger-full", "tool permission preset: readonly | workspace-write | danger-full")
 	)
 	flag.Parse()
 
@@ -80,13 +81,14 @@ func main() {
 	defer stop()
 
 	cfg := cli.Config{
-		ProviderName:  effectiveProvider,
-		APIKey:        apiKey,
-		Model:         effectiveModel,
-		Endpoint:      effectiveEndpoint,
-		MaxIterations: *maxIterations,
-		SessionDir:    *sessionDir,
-		ResumeID:      *resumeID,
+		ProviderName:   effectiveProvider,
+		APIKey:         apiKey,
+		Model:          effectiveModel,
+		Endpoint:       effectiveEndpoint,
+		MaxIterations:  *maxIterations,
+		SessionDir:     *sessionDir,
+		ResumeID:       *resumeID,
+		PermissionMode: *permissionMode,
 	}
 
 	if err := cli.Run(ctx, cfg); err != nil {

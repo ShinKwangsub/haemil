@@ -54,6 +54,9 @@ func NewGlobSearch() *GlobSearchTool {
 
 func (t *GlobSearchTool) Spec() runtime.ToolSpec { return t.spec }
 
+// Capability classifies glob_search as a pure read.
+func (t *GlobSearchTool) Capability() runtime.Capability { return runtime.CapRead }
+
 // excludedDirs are skipped during walks. These are near-universally noise in
 // search results — the caller can still glob inside them explicitly if needed.
 var excludedDirs = map[string]bool{

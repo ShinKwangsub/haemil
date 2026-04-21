@@ -23,6 +23,10 @@ type Options struct {
 
 	// MaxTokens caps output tokens per Chat call. Anthropic requires this.
 	MaxTokens int
+
+	// Policy gates tool invocations. A nil Policy means "allow everything"
+	// (pre-C2 behavior). See permissions.go for mode semantics.
+	Policy *Policy
 }
 
 // ToolCallRecord captures a single tool invocation during a turn, useful for
@@ -212,6 +216,26 @@ func (r *Runtime) RunTurn(ctx context.Context, userInput string) (*TurnSummary, 
 					IsError:  true,
 				})
 				continue
+			}
+			// Gate with Policy before executing. Deny/Ask both surface as
+			// an error tool_result so the model can observe the refusal
+			// and respond to the user; the loop keeps running.
+			if r.opts.Policy != nil {
+				if dec, reason := r.opts.Policy.Authorize(tool, use.Input); dec != DecisionAllow {
+					resultBlocks = append(resultBlocks, ContentBlock{
+						Type:      BlockTypeToolResult,
+						ToolUseID: use.ID,
+						Content:   reason,
+						IsError:   true,
+					})
+					summary.ToolCalls = append(summary.ToolCalls, ToolCallRecord{
+						ToolName: use.Name,
+						Input:    string(use.Input),
+						Output:   reason,
+						IsError:  true,
+					})
+					continue
+				}
 			}
 			output, execErr := tool.Execute(ctx, use.Input)
 			isErr := execErr != nil

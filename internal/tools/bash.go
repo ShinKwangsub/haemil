@@ -68,6 +68,9 @@ func NewBash() *BashTool {
 // Spec returns the cached ToolSpec.
 func (b *BashTool) Spec() runtime.ToolSpec { return b.spec }
 
+// Capability classifies bash as arbitrary command execution.
+func (b *BashTool) Capability() runtime.Capability { return runtime.CapExec }
+
 // bashInput is the shape of {command, timeout_seconds} from the model.
 type bashInput struct {
 	Command        string `json:"command"`

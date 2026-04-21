@@ -75,6 +75,9 @@ func NewGrepSearch() *GrepSearchTool {
 
 func (t *GrepSearchTool) Spec() runtime.ToolSpec { return t.spec }
 
+// Capability classifies grep_search as a pure read.
+func (t *GrepSearchTool) Capability() runtime.Capability { return runtime.CapRead }
+
 func (t *GrepSearchTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	if len(input) == 0 {
 		return "", fmt.Errorf("grep_search: empty input")

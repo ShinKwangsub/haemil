@@ -52,6 +52,9 @@ func NewWriteFile() *WriteFileTool {
 
 func (t *WriteFileTool) Spec() runtime.ToolSpec { return t.spec }
 
+// Capability classifies write_file as a workspace write.
+func (t *WriteFileTool) Capability() runtime.Capability { return runtime.CapWrite }
+
 func (t *WriteFileTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
 	if len(input) == 0 {
 		return "", errFileEmptyPath

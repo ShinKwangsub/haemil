@@ -13,8 +13,9 @@
 - **Phase 3 진행 중** — 컴포넌트 추출 (7개 플랫폼, 사이클 C1~C16)
   - **C1 file_ops** ✅ 완료 (2026-04-22) — read/write/edit/glob/grep 5개 도구
   - **C4 멀티 프로바이더** ✅ 완료 (2026-04-22, 앞당김) — OpenAI-compat (oMLX/OpenAI/로컬)
-  - **C2 권한 모드** 🔜 다음 사이클 후보
-  - C3/C5~C16 — 대기
+  - **C2 권한 모드** ✅ 완료 (2026-04-22) — readonly / workspace-write / danger-full (기본)
+  - **C3 bash 검증** 🔜 다음 사이클 후보
+  - C5~C16 — 대기
 
 **다음 세션 시작 시 읽을 것**:
 1. `CLAUDE.md` (이 파일) — 전체 맥락
@@ -27,13 +28,18 @@
 - `ANTHROPIC_API_KEY=... ./haemil` — Anthropic 클라이언트
 - `OPENAI_API_KEY=... ./haemil -provider openai` — OpenAI
 - 도구 6개: **bash**, **read_file**, **write_file**, **edit_file**, **glob_search**, **grep_search**
+- 권한 모드 (C2): `-permission-mode readonly | workspace-write | danger-full` (기본 `danger-full`)
+  - readonly → CapRead 만 (read/glob/grep)
+  - workspace-write → CapRead+CapWrite (read/glob/grep/write/edit), bash 차단
+  - danger-full → 전부 허용 (현재 동작)
 - JSONL 세션 저장 `~/.haemil/sessions/<id>.jsonl` (0700 dir / 0600 file)
 - `-session <id>` 플래그로 이전 세션 replay
 - 슬래시 명령: `/exit`, `/help`
 
 ## 검증 상태
-- `go build ./...` / `go vet ./...` / `go test ./...` — **81 PASS / 0 FAIL**
+- `go build ./...` / `go vet ./...` / `go test ./...` — **88 테스트 PASS / 0 FAIL** (C2 에서 +7)
 - E2E 완료 (2026-04-22): oMLX / gemma4 + 6개 도구 전부 실제 호출 확인
+- E2E C2 완료 (2026-04-22): `-permission-mode readonly` 에서 bash 호출 → `permission_denied` 거부 + 모델이 이유 이해하고 복구
 - 커밋: `c0dea5d` (C1 file_ops), `8cff014` (OpenAI provider), `7190178` (Phase 2b), `5eec0dd` (docs), `cb7fb66` (Phase 2a), `120f67e` (Graphify), `a1e42d4` (initial)
 
 ## 기술 스택 (확정)
@@ -46,12 +52,13 @@
 
 ## 디렉토리 구조
 
-### Go 코드 (Phase 2~3 C1 완료 기준)
-- `cmd/haemil/main.go` — CLI 엔트리포인트, flag 파싱 (`-provider`, `-model`, `-endpoint`, `-session`, ...)
+### Go 코드 (Phase 2~3 C2 완료 기준)
+- `cmd/haemil/main.go` — CLI 엔트리포인트, flag 파싱 (`-provider`, `-model`, `-endpoint`, `-session`, `-permission-mode`, ...)
 - `internal/runtime/` — 도메인 타입 + Provider/Tool 인터페이스 (consumer defines interface)
   - `message.go` — Role, ContentBlock, Message, ChatRequest/Response, Provider, Tool
   - `session.go` — JSONL append-only 세션 저장 + replay (bufio.Scanner, 손상 줄 skip)
-  - `conversation.go` — Runtime, Options, TurnSummary, RunTurn (턴 루프 구현됨)
+  - `conversation.go` — Runtime, Options, TurnSummary, RunTurn (Policy 게이트 내장)
+  - `permissions.go` — Capability / PermissionMode / Policy / Authorize (C2)
 - `internal/provider/` — LLM 백엔드 구현
   - `provider.go` — New(name, apiKey, model, Options) 팩토리 + RedactAPIKey
   - `anthropic.go` — Anthropic Messages API (Bearer `x-api-key`, 13 함정 준수)
