@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/ShinKwangsub/haemil/internal/mcp"
+	"github.com/ShinKwangsub/haemil/internal/memory"
 	"github.com/ShinKwangsub/haemil/internal/provider"
 	"github.com/ShinKwangsub/haemil/internal/runtime"
 	"github.com/ShinKwangsub/haemil/internal/tools"
@@ -112,11 +113,23 @@ func Run(ctx context.Context, cfg Config) error {
 		toolList = append(toolList, mcpReg.Tools...)
 	}
 
+	// 4c. Memory (C8). Render the combined user+project memory as a
+	// system-prompt suffix. Missing files are treated as empty (no error).
+	memCtx := memory.NewContext()
+	memBlock, memErr := memCtx.Render()
+	if memErr != nil {
+		fmt.Fprintf(cfg.Stderr, "warning: memory: %v\n", memErr)
+	}
+	effectiveSystem := systemPrompt
+	if memBlock != "" {
+		effectiveSystem = systemPrompt + "\n\n" + memBlock
+	}
+
 	// 5. Runtime.
 	rt := runtime.New(p, toolList, session, runtime.Options{
 		Model:         cfg.Model,
 		MaxIterations: cfg.MaxIterations,
-		SystemPrompt:  systemPrompt,
+		SystemPrompt:  effectiveSystem,
 		MaxTokens:     4096,
 		Policy:        policy,
 	})
@@ -222,23 +235,95 @@ func isSlashCommand(line string) bool {
 
 // handleSlash returns true if the REPL should exit.
 func handleSlash(cfg Config, rt *runtime.Runtime, line string) bool {
-	switch line {
+	// Split once so args-bearing commands (/remember, /remember-user) can
+	// read the remainder. Unknown bare commands still fall through to the
+	// default case.
+	head, rest := splitSlashCommand(line)
+	switch head {
 	case "/exit", "/quit":
 		fmt.Fprintln(cfg.Stdout, "bye.")
 		return true
 	case "/help":
 		fmt.Fprintln(cfg.Stdout, "commands:")
-		fmt.Fprintln(cfg.Stdout, "  /exit     — quit")
-		fmt.Fprintln(cfg.Stdout, "  /help     — this message")
-		fmt.Fprintln(cfg.Stdout, "  /compact  — summarise older messages, preserve the recent tail")
+		fmt.Fprintln(cfg.Stdout, "  /exit              — quit")
+		fmt.Fprintln(cfg.Stdout, "  /help              — this message")
+		fmt.Fprintln(cfg.Stdout, "  /compact           — summarise older messages, preserve the recent tail")
+		fmt.Fprintln(cfg.Stdout, "  /memory            — show current user + project memory")
+		fmt.Fprintln(cfg.Stdout, "  /remember <text>   — append <text> to project memory (.haemil/MEMORY.md)")
+		fmt.Fprintln(cfg.Stdout, "  /remember-user <text> — append <text> to user memory (~/.haemil/USER.md)")
 		return false
 	case "/compact":
 		handleCompact(cfg, rt)
+		return false
+	case "/memory":
+		handleMemoryShow(cfg)
+		return false
+	case "/remember":
+		handleRemember(cfg, rest, false)
+		return false
+	case "/remember-user":
+		handleRemember(cfg, rest, true)
 		return false
 	default:
 		fmt.Fprintf(cfg.Stdout, "unknown command: %s (try /help)\n", line)
 		return false
 	}
+}
+
+// splitSlashCommand splits "/cmd rest of line" into ("/cmd", "rest of line").
+// Returns the whole line as head and "" for rest if there is no whitespace.
+func splitSlashCommand(line string) (head, rest string) {
+	for i, r := range line {
+		if r == ' ' || r == '\t' {
+			return line[:i], strings.TrimSpace(line[i+1:])
+		}
+	}
+	return line, ""
+}
+
+// handleMemoryShow prints the combined user+project memory. If both are
+// empty the user is told explicitly so they know why nothing loads.
+func handleMemoryShow(cfg Config) {
+	mc := memory.NewContext()
+	userBullets, _ := mc.User.Bullets()
+	projectBullets, _ := mc.Project.Bullets()
+	if len(userBullets) == 0 && len(projectBullets) == 0 {
+		fmt.Fprintf(cfg.Stdout, "memory: empty (user=%s, project=%s)\n", mc.User.Path, mc.Project.Path)
+		return
+	}
+	fmt.Fprintln(cfg.Stdout, "memory:")
+	if len(userBullets) > 0 {
+		fmt.Fprintf(cfg.Stdout, "  [user] %s — %d bullet(s)\n", mc.User.Path, len(userBullets))
+		for _, b := range userBullets {
+			fmt.Fprintf(cfg.Stdout, "    - %s\n", b)
+		}
+	}
+	if len(projectBullets) > 0 {
+		fmt.Fprintf(cfg.Stdout, "  [project] %s — %d bullet(s)\n", mc.Project.Path, len(projectBullets))
+		for _, b := range projectBullets {
+			fmt.Fprintf(cfg.Stdout, "    - %s\n", b)
+		}
+	}
+	fmt.Fprintln(cfg.Stdout, "note: memory is injected into the system prompt on session start. restart to apply new bullets.")
+}
+
+// handleRemember appends text to the appropriate store. user=true writes
+// to USER.md (global), otherwise to MEMORY.md (project-local).
+func handleRemember(cfg Config, text string, user bool) {
+	if text == "" {
+		fmt.Fprintln(cfg.Stdout, "usage: /remember <text>  (or /remember-user <text>)")
+		return
+	}
+	mc := memory.NewContext()
+	store := mc.Project
+	if user {
+		store = mc.User
+	}
+	if err := store.Append(text); err != nil {
+		fmt.Fprintf(cfg.Stderr, "remember: %v\n", err)
+		return
+	}
+	fmt.Fprintf(cfg.Stdout, "remembered in %s: %s\n", store.Path, text)
 }
 
 // handleCompact invokes runtime.Compact on the active session and persists

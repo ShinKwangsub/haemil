@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -247,6 +248,75 @@ func TestREPLCompactAboveThreshold(t *testing.T) {
 	// After compaction the in-memory list should be shorter than 8.
 	if got := len(sess.Messages()); got >= 8 {
 		t.Errorf("post-compact len: got %d, expected < 8", got)
+	}
+}
+
+// TestREPLMemoryAndRemember: /remember writes, /memory shows it back.
+// Redirects HOME + cwd to a temp dir so we don't pollute the user's
+// real ~/.haemil/USER.md or project's .haemil/MEMORY.md.
+func TestREPLMemoryAndRemember(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// chdir to a fresh project dir so project MEMORY.md lives there.
+	prevCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	projDir := tmp + "/proj"
+	if err := os.Mkdir(projDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(projDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(prevCwd)
+
+	provider := &fakeProvider{responses: []*runtime.ChatResponse{}}
+	sess, _ := runtime.NewSession(tmp + "/sessions")
+	defer sess.Close()
+	rt := runtime.New(provider, nil, sess, runtime.Options{MaxIterations: 10, MaxTokens: 1024})
+
+	stdin := strings.NewReader("/memory\n/remember 광섭 uses 반말\n/remember-user likes short responses\n/memory\n/exit\n")
+	var stdout, stderr bytes.Buffer
+	cfg := Config{Stdin: stdin, Stdout: &stdout, Stderr: &stderr}
+
+	_ = runREPL(context.Background(), cfg, rt)
+	out := stdout.String()
+
+	// First /memory: empty state.
+	if !strings.Contains(out, "memory: empty") {
+		t.Errorf("expected initial empty state, got %q", out)
+	}
+	// Remembered output.
+	if !strings.Contains(out, "remembered in") {
+		t.Errorf("expected 'remembered in' confirmation, got %q", out)
+	}
+	// Second /memory: the two bullets should appear.
+	if !strings.Contains(out, "광섭 uses 반말") {
+		t.Errorf("project memory bullet missing, got %q", out)
+	}
+	if !strings.Contains(out, "likes short responses") {
+		t.Errorf("user memory bullet missing, got %q", out)
+	}
+}
+
+// TestREPLRememberEmptyShowsUsage verifies /remember with no args prints
+// a usage hint instead of silently succeeding.
+func TestREPLRememberEmptyShowsUsage(t *testing.T) {
+	provider := &fakeProvider{responses: []*runtime.ChatResponse{}}
+	dir := t.TempDir()
+	sess, _ := runtime.NewSession(dir)
+	defer sess.Close()
+	rt := runtime.New(provider, nil, sess, runtime.Options{MaxIterations: 10, MaxTokens: 1024})
+
+	stdin := strings.NewReader("/remember\n/exit\n")
+	var stdout, stderr bytes.Buffer
+	cfg := Config{Stdin: stdin, Stdout: &stdout, Stderr: &stderr}
+
+	_ = runREPL(context.Background(), cfg, rt)
+	if !strings.Contains(stdout.String(), "usage: /remember") {
+		t.Errorf("expected usage hint, got %q", stdout.String())
 	}
 }
 
