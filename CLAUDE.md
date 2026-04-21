@@ -18,8 +18,8 @@
   - **C5 세션 압축** ✅ 완료 (2026-04-22) — 템플릿 기반 요약 (LLM 호출 없음), tool 쌍 경계 보호, `/compact` 명령, JSONL compaction marker
   - **C7 MCP 클라이언트** ✅ 완료 (2026-04-22) — stdio JSON-RPC 2.0, initialize/tools/list/tools/call, `~/.haemil/mcp.json` 설정
   - **C8 메모리** ✅ 완료 (2026-04-22) — USER.md (~/.haemil/) + 프로젝트 MEMORY.md (.haemil/), `/memory` 조회, `/remember` 추가, 시작 시 시스템 프롬프트 주입
-  - **C6 Hook** 🔜 다음 사이클 후보
-  - C9~C16 — 대기
+  - **C6 Hook** ✅ 완료 (2026-04-22) — Pre/PostToolUse subprocess hook, `.haemil/hooks.json` 설정, deny/modify/append 플로우
+  - **Phase 3 완료** ✅ (2026-04-22) — C1~C8 전부 완료. C9~C16 은 Phase 4 로 이동 (UI / 멀티테넌트 / 에이전트간 통신)
 
 **다음 세션 시작 시 읽을 것**:
 1. `CLAUDE.md` (이 파일) — 전체 맥락
@@ -41,7 +41,7 @@
 - 슬래시 명령: `/exit`, `/help`, `/compact` (C5), `/memory` + `/remember [-user]` (C8)
 
 ## 검증 상태
-- `go build ./...` / `go vet ./...` / `go test ./...` — **128 테스트 PASS / 0 FAIL** (C8 에서 +11)
+- `go build ./...` / `go vet ./...` / `go test ./...` — **143 테스트 PASS / 0 FAIL** (C6 에서 +15)
 - E2E C1~C5 완료: oMLX/gemma4 + 6개 도구 + 권한 모드 + bash 검증 + `/compact` 슬래시
 - E2E C5 완료 (2026-04-22): REPL `/compact` → 임계값 아래일 때 "below threshold" skip 메시지. JSONL marker 라인 replay 는 `TestSessionApplyCompactionRoundtrip` 가 검증
 - 커밋: `79d96fc` (C3), `d28d98b` (C2), `c0dea5d` (C1 file_ops), `8cff014` (OpenAI provider), `7190178` (Phase 2b), `5eec0dd` (docs), `cb7fb66` (Phase 2a), `120f67e` (Graphify), `a1e42d4` (initial)
@@ -64,6 +64,8 @@
   - `conversation.go` — Runtime, Options, TurnSummary, RunTurn (Policy 게이트 내장)
   - `permissions.go` — Capability / PermissionMode / Policy / Authorize (C2)
   - `compact.go` — CompactionConfig / ShouldCompact / Compact + 템플릿 요약 + 쌍 경계 보호 (C5)
+- `internal/hooks/` — Pre/Post ToolUse 훅 (C6)
+  - `hooks.go` — Config / Runner / HookSpec, subprocess stdin/stdout JSON 계약, deny/modify/append
 - `internal/memory/` — 메모리 (C8)
   - `memory.go` — Store / Context, USER.md + 프로젝트 MEMORY.md, `<memory-context>` 렌더링
 - `internal/mcp/` — MCP 클라이언트 (C7)

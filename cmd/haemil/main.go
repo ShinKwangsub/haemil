@@ -25,6 +25,7 @@ func main() {
 		resumeID       = flag.String("session", "", "resume an existing session by id")
 		permissionMode = flag.String("permission-mode", "danger-full", "tool permission preset: readonly | workspace-write | danger-full")
 		mcpConfigPath  = flag.String("mcp-config", "", "path to mcp.json (default ~/.haemil/mcp.json)")
+		hooksPath      = flag.String("hooks", "", "path to hooks.json (default <cwd>/.haemil/hooks.json)")
 	)
 	flag.Parse()
 
@@ -91,6 +92,7 @@ func main() {
 		ResumeID:       *resumeID,
 		PermissionMode: *permissionMode,
 		MCPConfigPath:  *mcpConfigPath,
+		HooksPath:      *hooksPath,
 	}
 
 	if err := cli.Run(ctx, cfg); err != nil {

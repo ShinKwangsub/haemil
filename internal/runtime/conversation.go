@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -27,6 +28,24 @@ type Options struct {
 	// Policy gates tool invocations. A nil Policy means "allow everything"
 	// (pre-C2 behavior). See permissions.go for mode semantics.
 	Policy *Policy
+
+	// Hooks runs subprocess-based Pre/PostToolUse hooks around each tool
+	// invocation. Nil Hooks means no hooks (pre-C6 behavior). The
+	// interface is minimal by design so runtime doesn't import the hooks
+	// package directly (avoids a dep cycle with cli.Run wiring).
+	Hooks HookRunner
+}
+
+// HookRunner is the optional interface consumed by RunTurn for tool-use
+// hooks. The cli layer wires an internal/hooks.Runner that satisfies it.
+// Nil implementations are allowed via a nil Options.Hooks field.
+type HookRunner interface {
+	// RunPre returns (possiblyModifiedInput, allowed, denyContext, err).
+	// On allowed=false, the caller must SKIP tool execution and surface
+	// denyContext as the tool_result content.
+	RunPre(ctx context.Context, toolName string, input json.RawMessage) (json.RawMessage, bool, string, error)
+	// RunPost returns (possiblyModifiedOutput, possiblyFlippedError, err).
+	RunPost(ctx context.Context, toolName string, input json.RawMessage, output string, isError bool) (string, bool, error)
 }
 
 // ToolCallRecord captures a single tool invocation during a turn, useful for
@@ -237,7 +256,37 @@ func (r *Runtime) RunTurn(ctx context.Context, userInput string) (*TurnSummary, 
 					continue
 				}
 			}
-			output, execErr := tool.Execute(ctx, use.Input)
+
+			// PreToolUse hooks (C6). A deny from any hook short-circuits
+			// execution — we surface denyContext as an error tool_result.
+			// Modified input stacks across hooks and feeds Execute.
+			effectiveInput := use.Input
+			if r.opts.Hooks != nil {
+				modInput, allowed, denyCtx, hookErr := r.opts.Hooks.RunPre(ctx, use.Name, use.Input)
+				if hookErr != nil {
+					// Hook failures are logged into the tool_result as a warning
+					// but do NOT block the tool — fail-open to preserve progress.
+					denyCtx = "[hook warning] " + hookErr.Error()
+				} else {
+					effectiveInput = modInput
+				}
+				if !allowed {
+					resultBlocks = append(resultBlocks, ContentBlock{
+						Type:      BlockTypeToolResult,
+						ToolUseID: use.ID,
+						Content:   denyCtx,
+						IsError:   true,
+					})
+					summary.ToolCalls = append(summary.ToolCalls, ToolCallRecord{
+						ToolName: use.Name,
+						Input:    string(use.Input),
+						Output:   denyCtx,
+						IsError:  true,
+					})
+					continue
+				}
+			}
+			output, execErr := tool.Execute(ctx, effectiveInput)
 			isErr := execErr != nil
 			content := output
 			if isErr {
@@ -247,6 +296,20 @@ func (r *Runtime) RunTurn(ctx context.Context, userInput string) (*TurnSummary, 
 					content = execErr.Error()
 				}
 			}
+			// PostToolUse hooks (C6). Can append to output, rewrite it, or
+			// flip the error flag. Hook errors become a warning suffix on
+			// the output — we never drop tool results because of a broken
+			// hook.
+			if r.opts.Hooks != nil {
+				newOut, newErr, hookErr := r.opts.Hooks.RunPost(ctx, use.Name, effectiveInput, content, isErr)
+				if hookErr != nil {
+					content = content + "\n[hook warning] " + hookErr.Error()
+				} else {
+					content = newOut
+					isErr = newErr
+				}
+			}
+
 			resultBlocks = append(resultBlocks, ContentBlock{
 				Type:      BlockTypeToolResult,
 				ToolUseID: use.ID,

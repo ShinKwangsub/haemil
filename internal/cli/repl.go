@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ShinKwangsub/haemil/internal/hooks"
 	"github.com/ShinKwangsub/haemil/internal/mcp"
 	"github.com/ShinKwangsub/haemil/internal/memory"
 	"github.com/ShinKwangsub/haemil/internal/provider"
@@ -29,6 +30,7 @@ type Config struct {
 	ResumeID       string // if non-empty, OpenSession instead of NewSession
 	PermissionMode string // "readonly" | "workspace-write" | "danger-full" (default danger-full)
 	MCPConfigPath  string // path to mcp.json; empty = default (~/.haemil/mcp.json)
+	HooksPath      string // path to hooks.json; empty = default (<cwd>/.haemil/hooks.json)
 
 	// Stdin / Stdout / Stderr allow tests to inject. If nil, os.Stdin/out/err.
 	Stdin  io.Reader
@@ -113,7 +115,19 @@ func Run(ctx context.Context, cfg Config) error {
 		toolList = append(toolList, mcpReg.Tools...)
 	}
 
-	// 4c. Memory (C8). Render the combined user+project memory as a
+	// 4c. Hooks (C6). Missing config is fine; invalid config warns and
+	// proceeds with no hooks configured.
+	hooksPath := cfg.HooksPath
+	if hooksPath == "" {
+		hooksPath = hooks.DefaultConfigPath()
+	}
+	hooksCfg, hooksErr := hooks.LoadConfig(hooksPath)
+	if hooksErr != nil {
+		fmt.Fprintf(cfg.Stderr, "warning: hooks config: %v\n", hooksErr)
+	}
+	hookRunner := hooks.NewRunner(hooksCfg)
+
+	// 4d. Memory (C8). Render the combined user+project memory as a
 	// system-prompt suffix. Missing files are treated as empty (no error).
 	memCtx := memory.NewContext()
 	memBlock, memErr := memCtx.Render()
@@ -132,6 +146,7 @@ func Run(ctx context.Context, cfg Config) error {
 		SystemPrompt:  effectiveSystem,
 		MaxTokens:     4096,
 		Policy:        policy,
+		Hooks:         hookRunner,
 	})
 
 	// 6. Greeting + REPL.
@@ -139,6 +154,10 @@ func Run(ctx context.Context, cfg Config) error {
 	if len(mcpReg.Servers) > 0 {
 		fmt.Fprintf(cfg.Stdout, "mcp: %d server(s) connected, %d tool(s) registered\n",
 			len(mcpReg.Servers), len(mcpReg.Tools))
+	}
+	if hookRunner.Enabled() {
+		fmt.Fprintf(cfg.Stdout, "hooks: %d pre + %d post loaded from %s\n",
+			len(hooksCfg.PreToolUse), len(hooksCfg.PostToolUse), hooksPath)
 	}
 	fmt.Fprintln(cfg.Stdout, "type /exit to quit, /help for commands")
 	fmt.Fprintln(cfg.Stdout)

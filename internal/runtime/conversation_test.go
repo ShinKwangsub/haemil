@@ -350,6 +350,129 @@ func TestRunTurnPermissionDenied(t *testing.T) {
 	}
 }
 
+// --- C6 Hook integration tests ----------------------------------------
+
+// fakeHookRunner is a HookRunner used in tests. Each method is a stub
+// the test wires up.
+type fakeHookRunner struct {
+	preCalls  int32
+	postCalls int32
+	preFn     func(ctx context.Context, toolName string, input json.RawMessage) (json.RawMessage, bool, string, error)
+	postFn    func(ctx context.Context, toolName string, input json.RawMessage, output string, isError bool) (string, bool, error)
+}
+
+func (r *fakeHookRunner) RunPre(ctx context.Context, toolName string, input json.RawMessage) (json.RawMessage, bool, string, error) {
+	atomic.AddInt32(&r.preCalls, 1)
+	if r.preFn != nil {
+		return r.preFn(ctx, toolName, input)
+	}
+	return input, true, "", nil
+}
+func (r *fakeHookRunner) RunPost(ctx context.Context, toolName string, input json.RawMessage, output string, isError bool) (string, bool, error) {
+	atomic.AddInt32(&r.postCalls, 1)
+	if r.postFn != nil {
+		return r.postFn(ctx, toolName, input, output, isError)
+	}
+	return output, isError, nil
+}
+
+// TestRunTurnPreHookDenies: a Pre hook denies the call → tool never runs,
+// tool_result carries the hook's reason, conversation loop recovers.
+func TestRunTurnPreHookDenies(t *testing.T) {
+	var executed int32
+	tool := &capTool{
+		name: "bash",
+		cap:  CapExec,
+		run: func(_ context.Context, _ json.RawMessage) (string, error) {
+			atomic.AddInt32(&executed, 1)
+			return "should not run", nil
+		},
+	}
+	hook := &fakeHookRunner{
+		preFn: func(ctx context.Context, toolName string, input json.RawMessage) (json.RawMessage, bool, string, error) {
+			return input, false, "blocked by policy hook", nil
+		},
+	}
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*ChatResponse{
+			{
+				Content: []ContentBlock{
+					{Type: BlockTypeToolUse, ID: "toolu_1", Name: "bash", Input: json.RawMessage(`{"command":"ls"}`)},
+				},
+				StopReason: "tool_use",
+			},
+			{
+				Content: []ContentBlock{
+					{Type: BlockTypeText, Text: "understood"},
+				},
+				StopReason: "end_turn",
+			},
+		},
+	}
+	rt := New(provider, []Tool{tool}, nil, Options{
+		MaxIterations: 10, MaxTokens: 1024, Hooks: hook,
+	})
+	summary, err := rt.RunTurn(context.Background(), "try it")
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if executed != 0 {
+		t.Errorf("tool should NOT have run, executed=%d", executed)
+	}
+	if len(summary.ToolCalls) != 1 || !summary.ToolCalls[0].IsError {
+		t.Fatalf("tool call: got %+v", summary.ToolCalls)
+	}
+	if !strings.Contains(summary.ToolCalls[0].Output, "blocked by policy hook") {
+		t.Errorf("deny context not in output: %q", summary.ToolCalls[0].Output)
+	}
+}
+
+// TestRunTurnPostHookRewrites: post hook replaces output + appends context.
+func TestRunTurnPostHookRewrites(t *testing.T) {
+	tool := &capTool{
+		name: "bash",
+		cap:  CapExec,
+		run: func(_ context.Context, _ json.RawMessage) (string, error) {
+			return "SECRET_TOKEN=abc123", nil
+		},
+	}
+	hook := &fakeHookRunner{
+		postFn: func(_ context.Context, _ string, _ json.RawMessage, out string, isErr bool) (string, bool, error) {
+			return "[redacted]\n(audited by hook)", isErr, nil
+		},
+	}
+	provider := &fakeProvider{
+		name: "fake",
+		responses: []*ChatResponse{
+			{
+				Content: []ContentBlock{
+					{Type: BlockTypeToolUse, ID: "toolu_1", Name: "bash", Input: json.RawMessage(`{}`)},
+				},
+				StopReason: "tool_use",
+			},
+			{
+				Content:    []ContentBlock{{Type: BlockTypeText, Text: "ok"}},
+				StopReason: "end_turn",
+			},
+		},
+	}
+	rt := New(provider, []Tool{tool}, nil, Options{
+		MaxIterations: 10, MaxTokens: 1024, Hooks: hook,
+	})
+	summary, err := rt.RunTurn(context.Background(), "go")
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	out := summary.ToolCalls[0].Output
+	if strings.Contains(out, "SECRET_TOKEN") {
+		t.Errorf("secret leaked: %q", out)
+	}
+	if !strings.Contains(out, "[redacted]") {
+		t.Errorf("post hook rewrite missing: %q", out)
+	}
+}
+
 // capTool is a fakeTool that also advertises a Capability.
 type capTool struct {
 	name string
