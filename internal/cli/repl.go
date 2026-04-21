@@ -76,10 +76,8 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}()
 
-	// 3. Tools.
-	toolList := tools.Default()
-
-	// 4. Policy (C2 권한 모드).
+	// 3. Policy (C2 권한 모드) — parsed first so we can wire it into tool
+	// constructors (C3 bash_validation needs the active mode).
 	modeStr := cfg.PermissionMode
 	if modeStr == "" {
 		modeStr = "danger-full"
@@ -89,6 +87,10 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("cli: permission-mode: %w", err)
 	}
 	policy := runtime.NewPolicy(mode, nil)
+
+	// 4. Tools — bash needs mode + workspace for its validation pipeline.
+	workspace, _ := os.Getwd()
+	toolList := tools.Default(mode, workspace)
 
 	// 5. Runtime.
 	rt := runtime.New(p, toolList, session, runtime.Options{

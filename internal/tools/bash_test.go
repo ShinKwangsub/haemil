@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ShinKwangsub/haemil/internal/runtime"
 )
 
 // TestBashSpecSchema validates the bash tool's advertised JSON Schema. The
@@ -19,7 +21,7 @@ import (
 //   - properties.command exists with type "string"
 //   - required includes "command"
 func TestBashSpecSchema(t *testing.T) {
-	spec := NewBash().Spec()
+	spec := NewBash(runtime.ModeDangerFullAccess, "").Spec()
 
 	if spec.Name != "bash" {
 		t.Errorf("name: got %q, want %q", spec.Name, "bash")
@@ -77,10 +79,9 @@ func TestBlockedPatternsCompile(t *testing.T) {
 		}
 	}
 
-	// Spot-check a few obviously bad commands hit a pattern.
+	// Catastrophic commands: MUST hit a pattern.
 	bad := []string{
 		"rm -rf /",
-		"rm -rf /home/user",
 		"mkfs.ext4 /dev/sda1",
 		"dd if=/dev/zero of=/dev/sda",
 		":(){ :|:& };:",
@@ -99,11 +100,16 @@ func TestBlockedPatternsCompile(t *testing.T) {
 		}
 	}
 
-	// And a few benign commands should NOT be flagged.
+	// C3 handles these: they should NOT be caught by the narrow
+	// BLOCKED_PATTERNS layer. The validation pipeline (bash_validation.go)
+	// warns on `rm -rf /home/user` via the catch-all rm check — but that
+	// is a Warn, not a hard Block.
 	ok := []string{
 		"ls -la",
 		"grep foo bar.txt",
-		"rm oldfile.txt",   // note: not rm -rf /
+		"rm oldfile.txt", // not rm -rf
+		"rm -rf /home/user",
+		"rm -rf /tmp/something",
 		"cat /etc/hosts",
 	}
 	for _, cmd := range ok {
@@ -117,7 +123,7 @@ func TestBlockedPatternsCompile(t *testing.T) {
 
 // TestBashExecuteEcho verifies a simple successful command returns its stdout.
 func TestBashExecuteEcho(t *testing.T) {
-	b := NewBash()
+	b := NewBash(runtime.ModeDangerFullAccess, "")
 	out, err := b.Execute(context.Background(), json.RawMessage(`{"command":"echo hello"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v (out=%q)", err, out)
@@ -130,7 +136,7 @@ func TestBashExecuteEcho(t *testing.T) {
 // TestBashExecuteCombinesStderr verifies stderr is merged into the captured
 // output (not dropped silently).
 func TestBashExecuteCombinesStderr(t *testing.T) {
-	b := NewBash()
+	b := NewBash(runtime.ModeDangerFullAccess, "")
 	out, _ := b.Execute(context.Background(), json.RawMessage(`{"command":"echo stdout; echo stderr >&2"}`))
 	if !strings.Contains(out, "stdout") || !strings.Contains(out, "stderr") {
 		t.Errorf("combined output: got %q, want both stdout and stderr", out)
@@ -140,7 +146,7 @@ func TestBashExecuteCombinesStderr(t *testing.T) {
 // TestBashExecuteNonZeroExit verifies a non-zero exit returns an error with
 // the output preserved (so the conversation loop can show both).
 func TestBashExecuteNonZeroExit(t *testing.T) {
-	b := NewBash()
+	b := NewBash(runtime.ModeDangerFullAccess, "")
 	out, err := b.Execute(context.Background(), json.RawMessage(`{"command":"echo fail; exit 7"}`))
 	if err == nil {
 		t.Fatal("expected error for exit 7, got nil")
@@ -152,7 +158,7 @@ func TestBashExecuteNonZeroExit(t *testing.T) {
 
 // TestBashExecuteBlocked verifies BLOCKED_PATTERNS reject before spawning.
 func TestBashExecuteBlocked(t *testing.T) {
-	b := NewBash()
+	b := NewBash(runtime.ModeDangerFullAccess, "")
 	out, err := b.Execute(context.Background(), json.RawMessage(`{"command":"rm -rf /"}`))
 	if err == nil {
 		t.Fatal("expected block for rm -rf /, got nil error")
@@ -167,7 +173,7 @@ func TestBashExecuteBlocked(t *testing.T) {
 
 // TestBashExecuteTimeout verifies timeout_seconds kills a hung command.
 func TestBashExecuteTimeout(t *testing.T) {
-	b := NewBash()
+	b := NewBash(runtime.ModeDangerFullAccess, "")
 	t0 := time.Now()
 	_, err := b.Execute(context.Background(), json.RawMessage(`{"command":"sleep 10","timeout_seconds":1}`))
 	elapsed := time.Since(t0)
@@ -184,7 +190,7 @@ func TestBashExecuteTimeout(t *testing.T) {
 
 // TestBashExecuteCtxCancel verifies external ctx cancel stops the command.
 func TestBashExecuteCtxCancel(t *testing.T) {
-	b := NewBash()
+	b := NewBash(runtime.ModeDangerFullAccess, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
@@ -205,7 +211,7 @@ func TestBashExecuteCtxCancel(t *testing.T) {
 
 // TestBashExecuteEmptyInput verifies invalid inputs are rejected cleanly.
 func TestBashExecuteEmptyInput(t *testing.T) {
-	b := NewBash()
+	b := NewBash(runtime.ModeDangerFullAccess, "")
 	cases := []string{
 		`{}`,
 		`{"command":""}`,

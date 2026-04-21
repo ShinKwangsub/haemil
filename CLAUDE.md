@@ -14,8 +14,9 @@
   - **C1 file_ops** ✅ 완료 (2026-04-22) — read/write/edit/glob/grep 5개 도구
   - **C4 멀티 프로바이더** ✅ 완료 (2026-04-22, 앞당김) — OpenAI-compat (oMLX/OpenAI/로컬)
   - **C2 권한 모드** ✅ 완료 (2026-04-22) — readonly / workspace-write / danger-full (기본)
-  - **C3 bash 검증** 🔜 다음 사이클 후보
-  - C5~C16 — 대기
+  - **C3 bash 검증** ✅ 완료 (2026-04-22) — CommandIntent 분류 + 4단계 파이프라인 (Mode/Sed/Destructive/Paths)
+  - **C5 세션 압축** 🔜 다음 사이클 후보
+  - C6~C16 — 대기
 
 **다음 세션 시작 시 읽을 것**:
 1. `CLAUDE.md` (이 파일) — 전체 맥락
@@ -37,10 +38,10 @@
 - 슬래시 명령: `/exit`, `/help`
 
 ## 검증 상태
-- `go build ./...` / `go vet ./...` / `go test ./...` — **88 테스트 PASS / 0 FAIL** (C2 에서 +7)
-- E2E 완료 (2026-04-22): oMLX / gemma4 + 6개 도구 전부 실제 호출 확인
-- E2E C2 완료 (2026-04-22): `-permission-mode readonly` 에서 bash 호출 → `permission_denied` 거부 + 모델이 이유 이해하고 복구
-- 커밋: `c0dea5d` (C1 file_ops), `8cff014` (OpenAI provider), `7190178` (Phase 2b), `5eec0dd` (docs), `cb7fb66` (Phase 2a), `120f67e` (Graphify), `a1e42d4` (initial)
+- `go build ./...` / `go vet ./...` / `go test ./...` — **94 테스트 PASS / 0 FAIL** (C3 에서 +12)
+- E2E C1~C4 완료: oMLX/gemma4 + 6개 도구 전부 실호출 + 권한 모드 + bash 검증
+- E2E C3 완료 (2026-04-22): danger-full + `mkdir x && rm -rf x` → `[warning] Recursive forced deletion...` prefix + 실행 성공. `cat ../../etc/hosts` → traversal warn
+- 커밋: `d28d98b` (C2), `c0dea5d` (C1 file_ops), `8cff014` (OpenAI provider), `7190178` (Phase 2b), `5eec0dd` (docs), `cb7fb66` (Phase 2a), `120f67e` (Graphify), `a1e42d4` (initial)
 
 ## 기술 스택 (확정)
 - 코어 엔진: Go
@@ -64,8 +65,9 @@
   - `anthropic.go` — Anthropic Messages API (Bearer `x-api-key`, 13 함정 준수)
   - `openai.go` — OpenAI-compat (Bearer auth, 로컬 서버는 apiKey="" 로 Authorization 생략)
 - `internal/tools/` — 도구 구현 (6개 등록됨)
-  - `tool.go` — Default() 레지스트리
-  - `bash.go` — BashTool + BLOCKED_PATTERNS + 프로세스 그룹 kill
+  - `tool.go` — Default(mode, workspace) 레지스트리
+  - `bash.go` — BashTool(mode, workspace) + 좁은 BLOCKED_PATTERNS (literal 루트만) + 프로세스 그룹 kill
+  - `bash_validation.go` — C3 검증 파이프라인 (Mode→Sed→Destructive→Paths), ClassifyCommand, 명령 분류 리스트
   - `fileutil.go` — 공용 (10MiB cap, binary 감지, 경로 해석)
   - `read_file.go`, `write_file.go`, `edit_file.go` — 파일 R/W/편집
   - `glob_search.go` — `**` 재귀 매칭, noise dir 자동 제외

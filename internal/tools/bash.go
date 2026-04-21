@@ -31,7 +31,7 @@ const bashSpecSchema = `{
   "required": ["command"]
 }`
 
-const bashSpecDescription = "Run a bash command on the local machine. Output is captured (stdout+stderr combined) and returned as text. This is a minimal Phase 2 tool with no permission layer — do not use it for anything that matters. Only obviously catastrophic commands (rm -rf /, fork bombs, etc.) are blocked. Full security policy arrives in Phase 3."
+const bashSpecDescription = "Run a bash command on the local machine. Output is captured (stdout+stderr combined) and returned as text. Commands are screened against a multi-stage validation pipeline (mode check → sed guard → destructive-pattern warn → path traversal warn). Blocked commands return an error; warnings run but prefix the output with a cautionary note."
 
 // defaultTimeoutSec is used when the caller does not specify timeout_seconds.
 const defaultTimeoutSec = 30
@@ -39,29 +39,53 @@ const defaultTimeoutSec = 30
 // maxOutputBytes caps captured output at 10 MiB (skeleton.md §8 / Phase 2b plan).
 const maxOutputBytes = 10 * 1024 * 1024
 
-// BLOCKED_PATTERNS matches commands that are almost certainly destructive.
-// THIS IS NOT A SECURITY BOUNDARY — see skeleton.md §8 for full rationale.
+// BLOCKED_PATTERNS matches commands that are catastrophically destructive
+// regardless of mode. These are a LAST line of defense behind C3's
+// ValidateCommand pipeline (see bash_validation.go). They should only fire
+// for commands that even DangerFullAccess must refuse.
+//
+// Kept narrow to avoid false positives: `rm -rf /tmp/foo` is NOT blocked
+// here (C3 checkDestructive warns on it); only `rm -rf /` (literal root)
+// is a hard block.
 var BLOCKED_PATTERNS = []*regexp.Regexp{
-	regexp.MustCompile(`\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|-r\s+-f|-f\s+-r)\s+/`),
+	// rm -rf (any flag form) targeting literal root `/` only.
+	regexp.MustCompile(`\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|-r\s+-f|-f\s+-r)\s+/\s*$`),
+	// mkfs.* — wipes a filesystem.
 	regexp.MustCompile(`\bmkfs\.[a-zA-Z0-9]+\b`),
+	// dd writing to a raw block device.
 	regexp.MustCompile(`\bdd\s+.*\bof=/dev/(sd[a-z]|nvme|hd[a-z]|disk)`),
+	// Fork bomb.
 	regexp.MustCompile(`:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:`),
+	// Redirecting to a raw block device.
 	regexp.MustCompile(`>\s*/dev/(sd[a-z]|nvme|hd[a-z]|disk)`),
 }
 
 // BashTool implements runtime.Tool for local bash execution.
+//
+// The tool stores the effective PermissionMode and workspace root so that
+// its validation pipeline (see bash_validation.go) can be parameterized
+// without re-plumbing them through every call. Both are captured at
+// construction time — callers rebuild the tool if the mode or workspace
+// changes.
 type BashTool struct {
-	spec runtime.ToolSpec
+	spec      runtime.ToolSpec
+	mode      runtime.PermissionMode
+	workspace string
 }
 
-// NewBash builds a BashTool. Real, cheap, safe to call during wiring.
-func NewBash() *BashTool {
+// NewBash builds a BashTool. mode is the active PermissionMode (runtime.Mode*);
+// workspace is the resolved absolute path of the workspace root (used by the
+// path-traversal heuristic — pass "" if unknown). Real, cheap, safe to call
+// during wiring.
+func NewBash(mode runtime.PermissionMode, workspace string) *BashTool {
 	return &BashTool{
 		spec: runtime.ToolSpec{
 			Name:        "bash",
 			Description: bashSpecDescription,
 			InputSchema: json.RawMessage(bashSpecSchema),
 		},
+		mode:      mode,
+		workspace: workspace,
 	}
 }
 
@@ -109,6 +133,17 @@ func (b *BashTool) Execute(ctx context.Context, input json.RawMessage) (string, 
 		}
 	}
 
+	// C3: full validation pipeline (mode / sed / destructive / paths).
+	// Block → refuse. Warn → run, but prefix the output with the warning.
+	verdict := ValidateCommand(in.Command, b.mode, b.workspace)
+	var warnPrefix string
+	switch verdict.Kind {
+	case ValidationBlock:
+		return "", fmt.Errorf("bash: validation blocked: %s", verdict.Reason)
+	case ValidationWarn:
+		warnPrefix = "[warning] " + verdict.Message + "\n"
+	}
+
 	// Combine ctx timeout with per-command timeout.
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(in.TimeoutSeconds)*time.Second)
 	defer cancel()
@@ -137,7 +172,7 @@ func (b *BashTool) Execute(ctx context.Context, input json.RawMessage) (string, 
 	cmd.Stderr = cmd.Stdout
 
 	err := cmd.Run()
-	out := buf.String()
+	out := warnPrefix + buf.String()
 
 	// Distinguish timeout/cancel from other exit errors.
 	if runCtx.Err() == context.DeadlineExceeded {

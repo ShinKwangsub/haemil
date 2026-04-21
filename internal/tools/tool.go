@@ -13,11 +13,17 @@ import (
 // default. Phase 2 shipped with bash; Phase 3 C1 adds file_ops
 // (read/write/edit/glob/grep). Later cycles add MCP-sourced tools.
 //
+// mode is the active PermissionMode — passed to bash so its validation
+// pipeline (bash_validation.go) can enforce mode-aware rules. workspace
+// is the resolved absolute path of the workspace root; pass "" if
+// unknown. Both are captured at construction time, so callers must
+// rebuild the tool set when mode or workspace change.
+//
 // The call is cheap — each constructor does no I/O — so cli.Run can call
 // it unconditionally during wiring.
-func Default() []runtime.Tool {
+func Default(mode runtime.PermissionMode, workspace string) []runtime.Tool {
 	return []runtime.Tool{
-		NewBash(),
+		NewBash(mode, workspace),
 		NewReadFile(),
 		NewWriteFile(),
 		NewEditFile(),
