@@ -9,14 +9,32 @@
 - **Phase 2**: 통합 엔진 뼈대 ✅ 완료 (2026-04-22)
   - **Phase 2a**: Go 스텁 (컴파일 + 테스트 + 설계 문서) ✅ 완료 (2026-04-11)
   - **Phase 2b**: 본문 구현 (SSE 파싱, bash 실행, 턴 루프, REPL) ✅ 완료 (2026-04-22)
-- **Graphify 통합** ✅ 완료 (2026-04-22) — 프로젝트 전체 지식 그래프
-- **Phase 3**: 컴포넌트 추출 (7개 플랫폼 통합, 사이클 C1~C16) 🔜 다음
+- **Graphify 통합** ✅ 완료 (2026-04-22)
+- **Phase 3 진행 중** — 컴포넌트 추출 (7개 플랫폼, 사이클 C1~C16)
+  - **C1 file_ops** ✅ 완료 (2026-04-22) — read/write/edit/glob/grep 5개 도구
+  - **C4 멀티 프로바이더** ✅ 완료 (2026-04-22, 앞당김) — OpenAI-compat (oMLX/OpenAI/로컬)
+  - **C2 권한 모드** 🔜 다음 사이클 후보
+  - C3/C5~C16 — 대기
 
-**다음 세션 시작 시 읽을 것**: `analysis/integration/skeleton.md` + `graphify-out/GRAPH_REPORT.md`
+**다음 세션 시작 시 읽을 것**:
+1. `CLAUDE.md` (이 파일) — 전체 맥락
+2. `analysis/integration/skeleton.md` — Phase 2 뼈대 스펙 (여전히 유효)
+3. `graphify-out/GRAPH_REPORT.md` — 프로젝트 god nodes + 커뮤니티
+4. `git log --oneline -10` — 최근 사이클 요약
 
-## Phase 2 완성 확인
-- `go build ./...` ✅  `go vet ./...` ✅  `go test ./...` ✅ (36 PASS / 0 FAIL)
-- `ANTHROPIC_API_KEY=sk-ant-... ./haemil <<< "ls\n/exit"` → 실제 bash 실행 + Claude 응답 + JSONL 세션 저장 (E2E 통과)
+## 현재 기능 (실제로 돌아감)
+- `./haemil -provider omlx` — 로컬 oMLX (gemma-4) 로 대화 + 도구 사용
+- `ANTHROPIC_API_KEY=... ./haemil` — Anthropic 클라이언트
+- `OPENAI_API_KEY=... ./haemil -provider openai` — OpenAI
+- 도구 6개: **bash**, **read_file**, **write_file**, **edit_file**, **glob_search**, **grep_search**
+- JSONL 세션 저장 `~/.haemil/sessions/<id>.jsonl` (0700 dir / 0600 file)
+- `-session <id>` 플래그로 이전 세션 replay
+- 슬래시 명령: `/exit`, `/help`
+
+## 검증 상태
+- `go build ./...` / `go vet ./...` / `go test ./...` — **81 PASS / 0 FAIL**
+- E2E 완료 (2026-04-22): oMLX / gemma4 + 6개 도구 전부 실제 호출 확인
+- 커밋: `c0dea5d` (C1 file_ops), `8cff014` (OpenAI provider), `7190178` (Phase 2b), `5eec0dd` (docs), `cb7fb66` (Phase 2a), `120f67e` (Graphify), `a1e42d4` (initial)
 
 ## 기술 스택 (확정)
 - 코어 엔진: Go
@@ -28,20 +46,25 @@
 
 ## 디렉토리 구조
 
-### Go 코드 (Phase 2)
-- `cmd/haemil/main.go` — CLI 엔트리포인트 (flag 파싱 + 시그널 + cli.Run)
+### Go 코드 (Phase 2~3 C1 완료 기준)
+- `cmd/haemil/main.go` — CLI 엔트리포인트, flag 파싱 (`-provider`, `-model`, `-endpoint`, `-session`, ...)
 - `internal/runtime/` — 도메인 타입 + Provider/Tool 인터페이스 (consumer defines interface)
   - `message.go` — Role, ContentBlock, Message, ChatRequest/Response, Provider, Tool
-  - `session.go` — JSONL append-only 세션 저장
-  - `conversation.go` — Runtime, Options, TurnSummary, RunTurn (턴 루프)
+  - `session.go` — JSONL append-only 세션 저장 + replay (bufio.Scanner, 손상 줄 skip)
+  - `conversation.go` — Runtime, Options, TurnSummary, RunTurn (턴 루프 구현됨)
 - `internal/provider/` — LLM 백엔드 구현
-  - `provider.go` — New 팩토리 + RedactAPIKey
-  - `anthropic.go` — raw net/http 기반 Anthropic 클라이언트 + sseScanner
-- `internal/tools/` — 도구 구현
+  - `provider.go` — New(name, apiKey, model, Options) 팩토리 + RedactAPIKey
+  - `anthropic.go` — Anthropic Messages API (Bearer `x-api-key`, 13 함정 준수)
+  - `openai.go` — OpenAI-compat (Bearer auth, 로컬 서버는 apiKey="" 로 Authorization 생략)
+- `internal/tools/` — 도구 구현 (6개 등록됨)
   - `tool.go` — Default() 레지스트리
-  - `bash.go` — BashTool + BLOCKED_PATTERNS
+  - `bash.go` — BashTool + BLOCKED_PATTERNS + 프로세스 그룹 kill
+  - `fileutil.go` — 공용 (10MiB cap, binary 감지, 경로 해석)
+  - `read_file.go`, `write_file.go`, `edit_file.go` — 파일 R/W/편집
+  - `glob_search.go` — `**` 재귀 매칭, noise dir 자동 제외
+  - `grep_search.go` — RE2 정규식 + include 필터 + context 라인
 - `internal/cli/` — REPL 조립 + 입력 루프
-  - `repl.go` — Run(ctx, cfg) 조립 함수
+  - `repl.go` — Run(ctx, cfg), isSlashCommand 게이트 (`/tmp/foo` 같은 경로는 메시지로 통과)
 
 **임포트 그래프**: `main → cli → runtime/provider/tools`. provider, tools 는 둘 다 runtime 을 쓰지만 **서로는 모른다**.
 
