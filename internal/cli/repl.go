@@ -1,13 +1,15 @@
 // Package cli wires the runtime, provider, and tools together and hosts the
-// REPL loop. Phase 2 is wiring-only — the actual input loop is deferred to
-// Phase 2b (see runtime/conversation.go and skeleton.md).
+// REPL loop.
 package cli
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ShinKwangsub/haemil/internal/provider"
 	"github.com/ShinKwangsub/haemil/internal/runtime"
@@ -22,25 +24,32 @@ type Config struct {
 	MaxIterations int    // cap on tool loop rounds
 	SessionDir    string // where JSONL session files live
 	ResumeID      string // if non-empty, OpenSession instead of NewSession
+
+	// Stdin / Stdout / Stderr allow tests to inject. If nil, os.Stdin/out/err.
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
 }
 
-// Run wires up provider + session + runtime + tools and hands control to
-// the REPL loop. Phase 2: the REPL is a stub that prints
-// "haemil skeleton ready — REPL not yet implemented" and exits cleanly,
-// so we can verify end-to-end wiring (including defer Close) without
-// implementing the input loop.
-//
-// Every constructor called here is REAL (no panic TODOs) — that's the
-// whole point of the "skeleton ready" smoke test. If any of these panics
-// the skeleton is broken and the test line below is never reached.
+// Run wires up provider + session + runtime + tools and runs the REPL loop.
 func Run(ctx context.Context, cfg Config) error {
-	// 1. Provider: real factory, real http.Client wiring, no network I/O.
+	if cfg.Stdin == nil {
+		cfg.Stdin = os.Stdin
+	}
+	if cfg.Stdout == nil {
+		cfg.Stdout = os.Stdout
+	}
+	if cfg.Stderr == nil {
+		cfg.Stderr = os.Stderr
+	}
+
+	// 1. Provider.
 	p, err := provider.New(cfg.ProviderName, cfg.APIKey, cfg.Model)
 	if err != nil {
 		return fmt.Errorf("cli: provider: %w", err)
 	}
 
-	// 2. Session: real MkdirAll + OpenFile, creates ~/.haemil/sessions/<id>.jsonl.
+	// 2. Session.
 	if cfg.SessionDir == "" {
 		home, herr := os.UserHomeDir()
 		if herr != nil {
@@ -48,7 +57,6 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 		cfg.SessionDir = filepath.Join(home, ".haemil", "sessions")
 	}
-
 	var session *runtime.Session
 	if cfg.ResumeID != "" {
 		session, err = runtime.OpenSession(cfg.SessionDir, cfg.ResumeID)
@@ -58,36 +66,171 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("cli: session: %w", err)
 	}
-	// defer Close covers both the happy path and any error path below.
 	defer func() {
 		if cerr := session.Close(); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: closing session: %v\n", cerr)
+			fmt.Fprintf(cfg.Stderr, "warning: closing session: %v\n", cerr)
 		}
 	}()
 
-	// 3. Tools: registry is a plain slice, cheap to build.
+	// 3. Tools.
 	toolList := tools.Default()
 
-	// 4. Runtime: pure field assignment + tool name lookup map.
+	// 4. Runtime.
 	rt := runtime.New(p, toolList, session, runtime.Options{
 		Model:         cfg.Model,
 		MaxIterations: cfg.MaxIterations,
-		SystemPrompt:  "You are Haemil, an AI business partner. This is a Phase 2 skeleton — not yet wired for real conversations.",
+		SystemPrompt:  systemPrompt,
 		MaxTokens:     4096,
 	})
 
-	// Smoke-test anchor: if we reach this line, every constructor above
-	// executed without panic. The session file exists on disk. The REPL
-	// input loop and the provider.Chat body are still stubs (Phase 2b),
-	// but the wiring is end-to-end verified.
-	fmt.Println("haemil skeleton ready — REPL not yet implemented")
-	_ = rt // silence "declared and not used" if future edits remove usage
+	// 5. Greeting + REPL.
+	fmt.Fprintf(cfg.Stdout, "haemil — Phase 2b REPL (session %s)\n", session.ID())
+	fmt.Fprintln(cfg.Stdout, "type /exit to quit, /help for commands")
+	fmt.Fprintln(cfg.Stdout)
 
-	// 5. Future: actual input loop here.
-	//    for {
-	//        line, err := readLine(...)
-	//        summary, err := rt.RunTurn(ctx, line)
-	//        render(summary)
-	//    }
-	return nil
+	return runREPL(ctx, cfg, rt)
+}
+
+// systemPrompt is the fixed system prompt for Phase 2. Phase 3 will
+// replace this with a dynamic prompt builder (claw-code pattern).
+const systemPrompt = "You are Haemil, an AI assistant running as a Phase 2 skeleton CLI. " +
+	"You have one tool: bash, which runs commands on the local machine. " +
+	"Use it sparingly and explain what you're about to run before doing so. " +
+	"Keep responses concise."
+
+// runREPL is the interactive input loop. Read a line, run a turn, render,
+// repeat. Exits cleanly on /exit, EOF, or ctx cancellation.
+func runREPL(ctx context.Context, cfg Config, rt *runtime.Runtime) error {
+	scanner := bufio.NewScanner(cfg.Stdin)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024) // support long paste
+	isTTY := isTerminal(cfg.Stdin)
+
+	for {
+		// Check ctx between turns.
+		if err := ctx.Err(); err != nil {
+			fmt.Fprintln(cfg.Stdout)
+			return nil
+		}
+
+		if isTTY {
+			fmt.Fprint(cfg.Stdout, "you > ")
+		}
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return fmt.Errorf("cli: stdin: %w", err)
+			}
+			// EOF — treat as graceful exit.
+			fmt.Fprintln(cfg.Stdout)
+			return nil
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		// Slash commands handled locally.
+		if strings.HasPrefix(line, "/") {
+			if done := handleSlash(cfg, rt, line); done {
+				return nil
+			}
+			continue
+		}
+
+		// Real turn.
+		summary, err := rt.RunTurn(ctx, line)
+		if err != nil {
+			// Partial renders first so user sees what was completed before the
+			// failure, then the error itself.
+			if summary != nil {
+				renderSummary(cfg.Stdout, summary)
+			}
+			fmt.Fprintf(cfg.Stderr, "error: %v\n", err)
+			if ctx.Err() != nil {
+				return nil
+			}
+			continue
+		}
+		renderSummary(cfg.Stdout, summary)
+	}
+}
+
+// handleSlash returns true if the REPL should exit.
+func handleSlash(cfg Config, _ *runtime.Runtime, line string) bool {
+	switch line {
+	case "/exit", "/quit":
+		fmt.Fprintln(cfg.Stdout, "bye.")
+		return true
+	case "/help":
+		fmt.Fprintln(cfg.Stdout, "commands:")
+		fmt.Fprintln(cfg.Stdout, "  /exit  — quit")
+		fmt.Fprintln(cfg.Stdout, "  /help  — this message")
+		return false
+	default:
+		fmt.Fprintf(cfg.Stdout, "unknown command: %s (try /help)\n", line)
+		return false
+	}
+}
+
+// renderSummary prints the assistant messages and tool call records in a
+// simple way. Phase 3 will replace this with a richer renderer.
+func renderSummary(w io.Writer, summary *runtime.TurnSummary) {
+	if summary == nil {
+		return
+	}
+	for i, msg := range summary.AssistantMessages {
+		for _, block := range msg.Content {
+			switch block.Type {
+			case runtime.BlockTypeText:
+				if strings.TrimSpace(block.Text) != "" {
+					fmt.Fprintf(w, "haemil > %s\n", block.Text)
+				}
+			case runtime.BlockTypeToolUse:
+				fmt.Fprintf(w, "  [tool] %s %s\n", block.Name, singleLine(string(block.Input), 100))
+			}
+		}
+		// Show tool results that followed this assistant message.
+		// (ToolCalls are in order, one-to-one with tool_use blocks across rounds.)
+		if i < len(summary.AssistantMessages)-1 {
+			// Between rounds, find the tool calls triggered by this message.
+			// Simple approach: print all recorded tool calls once, after the
+			// first assistant msg that triggered them. Phase 3 will align
+			// properly; for Phase 2 we just print them all after the loop.
+		}
+	}
+	for _, tc := range summary.ToolCalls {
+		marker := "result"
+		if tc.IsError {
+			marker = "error"
+		}
+		fmt.Fprintf(w, "  [%s] %s\n", marker, singleLine(tc.Output, 400))
+	}
+	if summary.StopReason != "" && summary.StopReason != "end_turn" {
+		fmt.Fprintf(w, "  (stop: %s, iters: %d, in: %d tok, out: %d tok)\n",
+			summary.StopReason, summary.Iterations, summary.Usage.InputTokens, summary.Usage.OutputTokens)
+	}
+}
+
+// singleLine collapses a string to a single line for compact display, with
+// a length cap.
+func singleLine(s string, max int) string {
+	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " ⏎ ")
+	if len(s) > max {
+		s = s[:max] + " …"
+	}
+	return s
+}
+
+// isTerminal reports whether r is an interactive terminal (for the "you >"
+// prompt). We only check os.Stdin; other readers (pipes, files, test
+// buffers) return false.
+func isTerminal(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }

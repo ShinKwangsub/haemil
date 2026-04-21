@@ -1,16 +1,20 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"os/exec"
 	"regexp"
+	"syscall"
+	"time"
 
 	"github.com/ShinKwangsub/haemil/internal/runtime"
 )
 
-// bashSpecSchema is the JSON Schema advertised to the provider. Pinned as a
-// string literal (not built from a struct) so TestBashSpecSchema can validate
-// the exact wire format without going through a marshalling roundtrip.
+// bashSpecSchema is the JSON Schema advertised to the provider.
 const bashSpecSchema = `{
   "type": "object",
   "properties": {
@@ -27,38 +31,25 @@ const bashSpecSchema = `{
   "required": ["command"]
 }`
 
-// bashSpecDescription is the short prose shown to the model.
 const bashSpecDescription = "Run a bash command on the local machine. Output is captured (stdout+stderr combined) and returned as text. This is a minimal Phase 2 tool with no permission layer — do not use it for anything that matters. Only obviously catastrophic commands (rm -rf /, fork bombs, etc.) are blocked. Full security policy arrives in Phase 3."
 
-// BLOCKED_PATTERNS matches commands that are almost certainly destructive
-// enough that we never want to run them, even in a development skeleton.
-// These are pre-compiled at package init time so runtime checks are cheap.
-//
-// THIS IS NOT A SECURITY BOUNDARY. Bypassing these patterns is trivial
-// (sudo, base64-decoded payloads, curl | sh, etc.). The sole purpose is to
-// prevent a distracted developer (or the model) from nuking the dev machine
-// by accident during Phase 2 smoke tests.
-//
-// The real permission model arrives in Phase 3 when we lift GoClaw's
-// 5-layer security architecture (see analysis/platforms/goclaw.md §2.4).
+// defaultTimeoutSec is used when the caller does not specify timeout_seconds.
+const defaultTimeoutSec = 30
+
+// maxOutputBytes caps captured output at 10 MiB (skeleton.md §8 / Phase 2b plan).
+const maxOutputBytes = 10 * 1024 * 1024
+
+// BLOCKED_PATTERNS matches commands that are almost certainly destructive.
+// THIS IS NOT A SECURITY BOUNDARY — see skeleton.md §8 for full rationale.
 var BLOCKED_PATTERNS = []*regexp.Regexp{
-	// rm -rf / (or /<anything>), including spaces and extra flags
 	regexp.MustCompile(`\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r|-r\s+-f|-f\s+-r)\s+/`),
-	// mkfs.* — format a filesystem
 	regexp.MustCompile(`\bmkfs\.[a-zA-Z0-9]+\b`),
-	// dd writing to a raw block device
 	regexp.MustCompile(`\bdd\s+.*\bof=/dev/(sd[a-z]|nvme|hd[a-z]|disk)`),
-	// Shell fork bomb :(){ :|:& };:
 	regexp.MustCompile(`:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:`),
-	// Overwriting a raw disk device via redirection
 	regexp.MustCompile(`>\s*/dev/(sd[a-z]|nvme|hd[a-z]|disk)`),
 }
 
 // BashTool implements runtime.Tool for local bash execution.
-//
-// Phase 2 stub: NewBash(), Spec() are real so the conversation loop can
-// advertise the tool and the test suite can validate the schema. Execute()
-// panics until Phase 2b fills in the actual subprocess logic.
 type BashTool struct {
 	spec runtime.ToolSpec
 }
@@ -74,17 +65,112 @@ func NewBash() *BashTool {
 	}
 }
 
-// Spec returns the cached ToolSpec. Real.
+// Spec returns the cached ToolSpec.
 func (b *BashTool) Spec() runtime.ToolSpec { return b.spec }
 
-// Execute runs the command. Stub until Phase 2b.
+// bashInput is the shape of {command, timeout_seconds} from the model.
+type bashInput struct {
+	Command        string `json:"command"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+}
+
+// Execute runs the bash command described in input.
 //
-// Phase 2b plan:
-//  1. Unmarshal input → {Command string, TimeoutSeconds int}
-//  2. Run every BLOCKED_PATTERNS against Command; reject with is_error=true
-//  3. exec.CommandContext(ctx, "bash", "-c", cmd) with timeout
-//  4. Capture stdout+stderr combined, cap output at 10 MB
-//  5. On ctx.Done() kill the process group (not just the pid)
+// Behaviour:
+//   - Parses input JSON → {Command, TimeoutSeconds}.
+//   - Rejects commands matching any BLOCKED_PATTERNS (returns error).
+//   - Runs via `bash -c <command>`.
+//   - Sets a process group so ctx cancellation / timeout kills children too.
+//   - Captures stdout+stderr combined, capped at 10 MiB.
+//   - Honors both ctx cancellation AND TimeoutSeconds (whichever first).
+//   - Non-zero exit codes are returned as errors with output attached.
 func (b *BashTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
-	panic("TODO: bash.Execute not implemented (Phase 2b)")
+	if len(input) == 0 {
+		return "", errors.New("bash: empty input")
+	}
+	var in bashInput
+	if err := json.Unmarshal(input, &in); err != nil {
+		return "", fmt.Errorf("bash: parse input: %w", err)
+	}
+	if in.Command == "" {
+		return "", errors.New("bash: command is required")
+	}
+	if in.TimeoutSeconds <= 0 {
+		in.TimeoutSeconds = defaultTimeoutSec
+	}
+
+	// Safety check before spawning anything.
+	for _, re := range BLOCKED_PATTERNS {
+		if re.MatchString(in.Command) {
+			return "", fmt.Errorf("bash: command blocked by safety pattern %q", re.String())
+		}
+	}
+
+	// Combine ctx timeout with per-command timeout.
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(in.TimeoutSeconds)*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, "bash", "-c", in.Command)
+	// New process group so SIGKILL on timeout/cancel reaches child processes
+	// (e.g. `bash -c "sleep 1000"` spawns sleep as child — killing only the
+	// bash pid leaves sleep orphaned otherwise).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Kill the whole process group on timeout/cancel.
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		pgid, err := syscall.Getpgid(cmd.Process.Pid)
+		if err == nil && pgid > 0 {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+			return nil
+		}
+		return cmd.Process.Kill()
+	}
+
+	var buf bytes.Buffer
+	cmd.Stdout = &cappedWriter{buf: &buf, cap: maxOutputBytes}
+	cmd.Stderr = cmd.Stdout
+
+	err := cmd.Run()
+	out := buf.String()
+
+	// Distinguish timeout/cancel from other exit errors.
+	if runCtx.Err() == context.DeadlineExceeded {
+		return out, fmt.Errorf("bash: timed out after %ds", in.TimeoutSeconds)
+	}
+	if ctx.Err() != nil {
+		return out, ctx.Err()
+	}
+	if err != nil {
+		// Non-zero exit: return the captured output AND the error so the
+		// conversation loop can record both.
+		return out, fmt.Errorf("bash: %w", err)
+	}
+	return out, nil
+}
+
+// cappedWriter writes to buf until cap bytes, then silently drops the rest.
+type cappedWriter struct {
+	buf *bytes.Buffer
+	cap int
+}
+
+func (w *cappedWriter) Write(p []byte) (int, error) {
+	if w.buf.Len() >= w.cap {
+		// Already at cap: drop silently but report bytes as "written" so
+		// the command doesn't get a short-write error.
+		return len(p), nil
+	}
+	remaining := w.cap - w.buf.Len()
+	if remaining >= len(p) {
+		return w.buf.Write(p)
+	}
+	_, _ = w.buf.Write(p[:remaining])
+	// Append a truncation marker once.
+	if !bytes.HasSuffix(w.buf.Bytes(), []byte("\n[output truncated: reached 10 MiB cap]\n")) {
+		w.buf.WriteString("\n[output truncated: reached 10 MiB cap]\n")
+	}
+	return len(p), nil
 }

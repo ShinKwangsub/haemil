@@ -1,12 +1,15 @@
 package runtime
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // Session is a JSONL-backed conversation log.
@@ -17,19 +20,21 @@ import (
 //
 // Durability policy (Phase 2 — safety over performance):
 //   - Directory: 0700
-//   - File:      0600, O_APPEND|O_CREATE|O_WRONLY
-//   - fsync on every append (file.Sync() after WriteString)
+//   - File:      0600, O_APPEND|O_CREATE|O_WRONLY for writes
+//   - fsync on every append (file.Sync() after Write)
 //   - Corrupt lines during replay are skipped with a warning — never fatal.
-//
-// Replay is NOT implemented in Phase 2; OpenSession opens the file for append
-// but leaves the in-memory message list empty. Append*/Messages are stubs
-// until Phase 2b.
 type Session struct {
 	id   string
 	dir  string
 	path string
 	file *os.File
 	msgs []Message
+}
+
+// sessionLine is the wire shape of one JSONL record.
+type sessionLine struct {
+	TS      string  `json:"ts"`
+	Message Message `json:"message"`
 }
 
 // ID returns the session identifier (16 hex chars, ~8 bytes of entropy).
@@ -40,9 +45,6 @@ func (s *Session) Path() string { return s.path }
 
 // NewSession creates a fresh session in dir. Dir is created with 0700 if
 // absent. The JSONL file is opened for O_APPEND|O_CREATE|O_WRONLY, 0600.
-//
-// This constructor does NOT touch the file beyond opening it (no header line,
-// no fsync). It is cheap and safe to call in cli.Run wiring.
 func NewSession(dir string) (*Session, error) {
 	if dir == "" {
 		return nil, errors.New("session: dir is empty")
@@ -68,9 +70,9 @@ func NewSession(dir string) (*Session, error) {
 	}, nil
 }
 
-// OpenSession resumes an existing session identified by id. Only the file
-// handle is re-opened in append mode; replay of prior messages is left as
-// a TODO for Phase 2b (see Append*/Messages stubs).
+// OpenSession resumes an existing session identified by id. It replays the
+// JSONL file to rebuild the in-memory message list, skipping any corrupt
+// lines with a stderr warning (never fatal).
 func OpenSession(dir, id string) (*Session, error) {
 	if dir == "" {
 		return nil, errors.New("session: dir is empty")
@@ -82,34 +84,111 @@ func OpenSession(dir, id string) (*Session, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, fmt.Errorf("session: stat %q: %w", path, err)
 	}
+
+	// Replay: open for read, scan, skip corrupt lines.
+	msgs, err := replaySession(path)
+	if err != nil {
+		return nil, fmt.Errorf("session: replay %q: %w", path, err)
+	}
+
+	// Reopen for append.
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("session: open %q: %w", path, err)
 	}
-	// TODO(Phase 2b): replay file → populate msgs, skipping corrupt lines
-	// with a warning (fmt.Fprintf(os.Stderr, "session: skipping corrupt line...")).
 	return &Session{
 		id:   id,
 		dir:  dir,
 		path: path,
 		file: f,
-		msgs: nil,
+		msgs: msgs,
 	}, nil
+}
+
+// replaySession reads the JSONL file line-by-line. Corrupt lines are
+// skipped with a stderr warning so a single bad record doesn't kill the
+// session.
+func replaySession(path string) ([]Message, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var msgs []Message
+	scanner := bufio.NewScanner(f)
+	// JSONL lines can be large (tool outputs embedded). Bump the buffer.
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec sessionLine
+		if err := json.Unmarshal(line, &rec); err != nil {
+			fmt.Fprintf(os.Stderr, "session: skipping corrupt line %d in %s: %v\n", lineNo, path, err)
+			continue
+		}
+		msgs = append(msgs, rec.Message)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return msgs, nil
 }
 
 // AppendUser appends a user message, fsyncing the file.
 func (s *Session) AppendUser(msg Message) error {
-	panic("TODO: session.AppendUser not implemented (Phase 2b)")
+	if msg.Role == "" {
+		msg.Role = RoleUser
+	}
+	return s.append(msg)
 }
 
 // AppendAssistant appends an assistant message, fsyncing the file.
 func (s *Session) AppendAssistant(msg Message) error {
-	panic("TODO: session.AppendAssistant not implemented (Phase 2b)")
+	if msg.Role == "" {
+		msg.Role = RoleAssistant
+	}
+	return s.append(msg)
 }
 
-// Messages returns the in-memory message list (post-replay).
+// append is the shared write+fsync path.
+func (s *Session) append(msg Message) error {
+	if s == nil || s.file == nil {
+		return errors.New("session: closed")
+	}
+	rec := sessionLine{
+		TS:      time.Now().UTC().Format(time.RFC3339Nano),
+		Message: msg,
+	}
+	buf, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("session: marshal: %w", err)
+	}
+	buf = append(buf, '\n')
+	if _, err := s.file.Write(buf); err != nil {
+		return fmt.Errorf("session: write: %w", err)
+	}
+	// Phase 2 policy: fsync after every append — safety over performance.
+	if err := s.file.Sync(); err != nil {
+		return fmt.Errorf("session: fsync: %w", err)
+	}
+	s.msgs = append(s.msgs, msg)
+	return nil
+}
+
+// Messages returns a copy of the in-memory message list (post-replay plus
+// any appends). Returns nil for a fresh, untouched session.
 func (s *Session) Messages() []Message {
-	panic("TODO: session.Messages not implemented (Phase 2b)")
+	if s == nil || len(s.msgs) == 0 {
+		return nil
+	}
+	out := make([]Message, len(s.msgs))
+	copy(out, s.msgs)
+	return out
 }
 
 // Close flushes and closes the underlying file.

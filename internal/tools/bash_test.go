@@ -1,8 +1,11 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 )
 
 // TestBashSpecSchema validates the bash tool's advertised JSON Schema. The
@@ -108,6 +111,109 @@ func TestBlockedPatternsCompile(t *testing.T) {
 			if p.MatchString(cmd) {
 				t.Errorf("command %q incorrectly matched BLOCKED_PATTERN %q", cmd, p)
 			}
+		}
+	}
+}
+
+// TestBashExecuteEcho verifies a simple successful command returns its stdout.
+func TestBashExecuteEcho(t *testing.T) {
+	b := NewBash()
+	out, err := b.Execute(context.Background(), json.RawMessage(`{"command":"echo hello"}`))
+	if err != nil {
+		t.Fatalf("Execute: %v (out=%q)", err, out)
+	}
+	if !strings.Contains(out, "hello") {
+		t.Errorf("output: got %q, want contains 'hello'", out)
+	}
+}
+
+// TestBashExecuteCombinesStderr verifies stderr is merged into the captured
+// output (not dropped silently).
+func TestBashExecuteCombinesStderr(t *testing.T) {
+	b := NewBash()
+	out, _ := b.Execute(context.Background(), json.RawMessage(`{"command":"echo stdout; echo stderr >&2"}`))
+	if !strings.Contains(out, "stdout") || !strings.Contains(out, "stderr") {
+		t.Errorf("combined output: got %q, want both stdout and stderr", out)
+	}
+}
+
+// TestBashExecuteNonZeroExit verifies a non-zero exit returns an error with
+// the output preserved (so the conversation loop can show both).
+func TestBashExecuteNonZeroExit(t *testing.T) {
+	b := NewBash()
+	out, err := b.Execute(context.Background(), json.RawMessage(`{"command":"echo fail; exit 7"}`))
+	if err == nil {
+		t.Fatal("expected error for exit 7, got nil")
+	}
+	if !strings.Contains(out, "fail") {
+		t.Errorf("output on error: got %q, want 'fail'", out)
+	}
+}
+
+// TestBashExecuteBlocked verifies BLOCKED_PATTERNS reject before spawning.
+func TestBashExecuteBlocked(t *testing.T) {
+	b := NewBash()
+	out, err := b.Execute(context.Background(), json.RawMessage(`{"command":"rm -rf /"}`))
+	if err == nil {
+		t.Fatal("expected block for rm -rf /, got nil error")
+	}
+	if !strings.Contains(err.Error(), "blocked") {
+		t.Errorf("error: got %q, want 'blocked' mentioned", err.Error())
+	}
+	if out != "" {
+		t.Errorf("expected empty output (command never ran), got %q", out)
+	}
+}
+
+// TestBashExecuteTimeout verifies timeout_seconds kills a hung command.
+func TestBashExecuteTimeout(t *testing.T) {
+	b := NewBash()
+	t0 := time.Now()
+	_, err := b.Execute(context.Background(), json.RawMessage(`{"command":"sleep 10","timeout_seconds":1}`))
+	elapsed := time.Since(t0)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error: got %q, want 'timed out' mentioned", err.Error())
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("elapsed %v — timeout did not fire promptly", elapsed)
+	}
+}
+
+// TestBashExecuteCtxCancel verifies external ctx cancel stops the command.
+func TestBashExecuteCtxCancel(t *testing.T) {
+	b := NewBash()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Execute(ctx, json.RawMessage(`{"command":"sleep 10"}`))
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected error after ctx cancel, got nil")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Execute did not return after ctx cancel")
+	}
+}
+
+// TestBashExecuteEmptyInput verifies invalid inputs are rejected cleanly.
+func TestBashExecuteEmptyInput(t *testing.T) {
+	b := NewBash()
+	cases := []string{
+		`{}`,
+		`{"command":""}`,
+	}
+	for _, c := range cases {
+		_, err := b.Execute(context.Background(), json.RawMessage(c))
+		if err == nil {
+			t.Errorf("expected error for input %q, got nil", c)
 		}
 	}
 }

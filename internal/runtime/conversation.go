@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // Options configures a Runtime instance.
@@ -106,21 +107,147 @@ func (r *Runtime) Session() *Session { return r.session }
 // ErrNoProvider is returned by RunTurn when no provider was configured.
 var ErrNoProvider = errors.New("runtime: no provider configured")
 
-// RunTurn executes one user turn end-to-end. Pseudocode (see skeleton.md
-// "턴 루프 알고리즘" for the canonical spec):
-//
-//  1. Append user message to session
-//  2. For i := 0; i < MaxIterations; i++:
-//     a. Call provider.Chat(ctx, req with tools[] advertised)
-//     b. Append assistant message to session
-//     c. If StopReason != "tool_use" → break
-//     d. For each tool_use block: resolve tool, Execute(ctx, input)
-//     e. Build a single user message whose Content is tool_result blocks
-//     f. Append that user message to session
-//  3. Return TurnSummary
+// RunTurn executes one user turn end-to-end. See skeleton.md §5 for the
+// canonical algorithm spec.
 //
 // On ctx cancellation RunTurn returns whatever it has accumulated so far
 // (partial TurnSummary) along with ctx.Err().
 func (r *Runtime) RunTurn(ctx context.Context, userInput string) (*TurnSummary, error) {
-	panic("TODO: runtime.RunTurn not implemented (Phase 2b)")
+	if r == nil || r.provider == nil {
+		return nil, ErrNoProvider
+	}
+	if userInput == "" {
+		return nil, errors.New("runtime: userInput is empty")
+	}
+
+	summary := &TurnSummary{}
+
+	// 1. User message → session + history
+	userMsg := Message{
+		Role:    RoleUser,
+		Content: []ContentBlock{{Type: BlockTypeText, Text: userInput}},
+	}
+	if r.session != nil {
+		if err := r.session.AppendUser(userMsg); err != nil {
+			return summary, fmt.Errorf("runtime: append user: %w", err)
+		}
+	}
+
+	// Build initial history: prior session messages + new user message.
+	var history []Message
+	if r.session != nil {
+		history = r.session.Messages()
+	} else {
+		history = []Message{userMsg}
+	}
+
+	// Advertise tools from registry.
+	toolSpecs := make([]ToolSpec, 0, len(r.tools))
+	for _, t := range r.tools {
+		toolSpecs = append(toolSpecs, t.Spec())
+	}
+
+	// 2. Provider ↔ Tool round loop.
+	for i := 0; i < r.opts.MaxIterations; i++ {
+		summary.Iterations++
+
+		// Honor ctx cancellation between rounds.
+		if err := ctx.Err(); err != nil {
+			return summary, err
+		}
+
+		// 2a. Call provider.Chat.
+		req := ChatRequest{
+			Model:     r.opts.Model,
+			System:    r.opts.SystemPrompt,
+			Messages:  history,
+			Tools:     toolSpecs,
+			MaxTokens: r.opts.MaxTokens,
+		}
+		resp, err := r.provider.Chat(ctx, req)
+		if err != nil {
+			return summary, fmt.Errorf("runtime: provider.Chat (iter %d): %w", i, err)
+		}
+		summary.Usage.InputTokens += resp.Usage.InputTokens
+		summary.Usage.OutputTokens += resp.Usage.OutputTokens
+		summary.StopReason = resp.StopReason
+
+		// 2b. Assistant message → session + history + summary.
+		assistantMsg := Message{Role: RoleAssistant, Content: resp.Content}
+		if r.session != nil {
+			if err := r.session.AppendAssistant(assistantMsg); err != nil {
+				return summary, fmt.Errorf("runtime: append assistant: %w", err)
+			}
+		}
+		history = append(history, assistantMsg)
+		summary.AssistantMessages = append(summary.AssistantMessages, assistantMsg)
+
+		// 2c. Collect tool_use blocks.
+		var toolUses []ContentBlock
+		for _, block := range resp.Content {
+			if block.Type == BlockTypeToolUse {
+				toolUses = append(toolUses, block)
+			}
+		}
+		if len(toolUses) == 0 {
+			// No tools requested → turn complete.
+			return summary, nil
+		}
+
+		// 2d. Execute each tool, build tool_result blocks.
+		resultBlocks := make([]ContentBlock, 0, len(toolUses))
+		for _, use := range toolUses {
+			tool, ok := r.toolByName[use.Name]
+			if !ok {
+				resultBlocks = append(resultBlocks, ContentBlock{
+					Type:      BlockTypeToolResult,
+					ToolUseID: use.ID,
+					Content:   "unknown tool: " + use.Name,
+					IsError:   true,
+				})
+				summary.ToolCalls = append(summary.ToolCalls, ToolCallRecord{
+					ToolName: use.Name,
+					Input:    string(use.Input),
+					Output:   "unknown tool: " + use.Name,
+					IsError:  true,
+				})
+				continue
+			}
+			output, execErr := tool.Execute(ctx, use.Input)
+			isErr := execErr != nil
+			content := output
+			if isErr {
+				if content != "" {
+					content = content + "\n" + execErr.Error()
+				} else {
+					content = execErr.Error()
+				}
+			}
+			resultBlocks = append(resultBlocks, ContentBlock{
+				Type:      BlockTypeToolResult,
+				ToolUseID: use.ID,
+				Content:   content,
+				IsError:   isErr,
+			})
+			summary.ToolCalls = append(summary.ToolCalls, ToolCallRecord{
+				ToolName: use.Name,
+				Input:    string(use.Input),
+				Output:   content,
+				IsError:  isErr,
+			})
+		}
+
+		// 2e. User message carrying tool_result blocks.
+		toolResultMsg := Message{Role: RoleUser, Content: resultBlocks}
+		if r.session != nil {
+			if err := r.session.AppendUser(toolResultMsg); err != nil {
+				return summary, fmt.Errorf("runtime: append tool_result: %w", err)
+			}
+		}
+		history = append(history, toolResultMsg)
+	}
+
+	// 3. Hit max_iterations — return with whatever we accumulated.
+	summary.StopReason = "max_iterations"
+	return summary, nil
 }

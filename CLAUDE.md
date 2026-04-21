@@ -6,12 +6,17 @@
 
 ## 현재 단계
 - **Phase 1**: 각 플랫폼 상세 소스 분석 ✅ 완료 (2026-04-10)
-- **Phase 2**: 통합 엔진 뼈대 🚧 진행 중
+- **Phase 2**: 통합 엔진 뼈대 ✅ 완료 (2026-04-22)
   - **Phase 2a**: Go 스텁 (컴파일 + 테스트 + 설계 문서) ✅ 완료 (2026-04-11)
-  - **Phase 2b**: 본문 구현 (SSE 파싱, bash 실행, 턴 루프, REPL) 🔜 다음 세션
-- **Phase 3**: 컴포넌트 추출 (7개 플랫폼 통합) — 예정
+  - **Phase 2b**: 본문 구현 (SSE 파싱, bash 실행, 턴 루프, REPL) ✅ 완료 (2026-04-22)
+- **Graphify 통합** ✅ 완료 (2026-04-22) — 프로젝트 전체 지식 그래프
+- **Phase 3**: 컴포넌트 추출 (7개 플랫폼 통합, 사이클 C1~C16) 🔜 다음
 
-**다음 세션 시작 시 읽을 것**: `analysis/integration/skeleton.md`
+**다음 세션 시작 시 읽을 것**: `analysis/integration/skeleton.md` + `graphify-out/GRAPH_REPORT.md`
+
+## Phase 2 완성 확인
+- `go build ./...` ✅  `go vet ./...` ✅  `go test ./...` ✅ (36 PASS / 0 FAIL)
+- `ANTHROPIC_API_KEY=sk-ant-... ./haemil <<< "ls\n/exit"` → 실제 bash 실행 + Claude 응답 + JSONL 세션 저장 (E2E 통과)
 
 ## 기술 스택 (확정)
 - 코어 엔진: Go
