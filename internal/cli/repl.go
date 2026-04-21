@@ -131,8 +131,10 @@ func runREPL(ctx context.Context, cfg Config, rt *runtime.Runtime) error {
 			continue
 		}
 
-		// Slash commands handled locally.
-		if strings.HasPrefix(line, "/") {
+		// Slash commands handled locally. Only recognise /<word> shapes
+		// (ASCII letters + optional digits/underscore/dash) so user input
+		// like "/tmp/foo" or "/Users/..." is treated as a normal message.
+		if isSlashCommand(line) {
 			if done := handleSlash(cfg, rt, line); done {
 				return nil
 			}
@@ -155,6 +157,28 @@ func runREPL(ctx context.Context, cfg Config, rt *runtime.Runtime) error {
 		}
 		renderSummary(cfg.Stdout, summary)
 	}
+}
+
+// isSlashCommand returns true if line starts with '/' followed by a bare
+// single word (letters, digits, underscore, hyphen) and optional whitespace
+// before any arguments. This distinguishes REPL commands like "/exit" from
+// user input like "/tmp/foo" or "/Users/name/file.txt" that happens to
+// start with a slash.
+func isSlashCommand(line string) bool {
+	if !strings.HasPrefix(line, "/") || len(line) < 2 {
+		return false
+	}
+	for i, r := range line[1:] {
+		if r == ' ' || r == '\t' {
+			return i > 0
+		}
+		if !(r == '_' || r == '-' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
 }
 
 // handleSlash returns true if the REPL should exit.

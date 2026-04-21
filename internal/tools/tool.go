@@ -10,13 +10,18 @@ import (
 )
 
 // Default returns the tools that are registered with every Runtime by
-// default. Phase 2 ships with bash only. Phase 3 will add file_ops, grep,
-// glob, and eventually MCP-sourced tools (see analysis/platforms/goose.md).
+// default. Phase 2 shipped with bash; Phase 3 C1 adds file_ops
+// (read/write/edit/glob/grep). Later cycles add MCP-sourced tools.
 //
-// The call is cheap — each tool's constructor does no I/O — so cli.Run can
-// call it unconditionally during wiring.
+// The call is cheap — each constructor does no I/O — so cli.Run can call
+// it unconditionally during wiring.
 func Default() []runtime.Tool {
 	return []runtime.Tool{
 		NewBash(),
+		NewReadFile(),
+		NewWriteFile(),
+		NewEditFile(),
+		NewGlobSearch(),
+		NewGrepSearch(),
 	}
 }

@@ -161,6 +161,36 @@ func TestREPLEOF(t *testing.T) {
 	}
 }
 
+// TestIsSlashCommand verifies only bare /<word> is treated as a command;
+// paths like /tmp/foo or /Users/x fall through to the runtime as messages.
+func TestIsSlashCommand(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"/exit", true},
+		{"/quit", true},
+		{"/help", true},
+		{"/foo", true},
+		{"/foo bar baz", true},
+		{"/foo_bar", true},
+		{"/my-cmd", true},
+		{"hello", false},
+		{"", false},
+		{"/", false},
+		{"/tmp/foo", false},
+		{"/Users/ayajin/haemil", false},
+		{"/path/to/file.txt 를 읽어줘", false},
+		{"/etc/hosts", false},
+	}
+	for _, c := range cases {
+		got := isSlashCommand(c.in)
+		if got != c.want {
+			t.Errorf("isSlashCommand(%q): got %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
 // TestREPLUnknownSlash verifies /foo prints unknown-command hint.
 func TestREPLUnknownSlash(t *testing.T) {
 	provider := &fakeProvider{responses: []*runtime.ChatResponse{}}
