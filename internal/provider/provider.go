@@ -13,35 +13,62 @@ import (
 	"github.com/ShinKwangsub/haemil/internal/runtime"
 )
 
+// Options carries optional configuration for provider construction.
+// Zero-value defaults are sensible; callers only set fields they care about.
+type Options struct {
+	// Endpoint overrides the default API URL. For Anthropic this replaces
+	// https://api.anthropic.com/v1/messages. For OpenAI-compatible providers
+	// it replaces https://api.openai.com/v1 (the /chat/completions suffix is
+	// always appended). Use this to point at a local gateway (e.g. oMLX).
+	Endpoint string
+
+	// HTTPTimeout caps a single request. Default 120s.
+	HTTPTimeout time.Duration
+}
+
 // New is the single entry point callers use to construct a provider by name.
-// cli.Run calls New during wiring. It is safe to call even without network
-// access because the constructor performs no I/O.
 //
-// Currently supported names: "anthropic".
-func New(name, apiKey, model string) (runtime.Provider, error) {
+// Supported names:
+//   - "anthropic" — Anthropic Messages API (x-api-key auth)
+//   - "openai"    — OpenAI-compatible chat/completions API (Bearer auth;
+//                   apiKey may be empty for local servers that don't require one)
+func New(name, apiKey, model string, opts ...Options) (runtime.Provider, error) {
+	var opt Options
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
+	if opt.HTTPTimeout == 0 {
+		opt.HTTPTimeout = 120 * time.Second
+	}
+	client := &http.Client{Timeout: opt.HTTPTimeout}
+
 	switch name {
 	case "anthropic":
 		return &anthropicProvider{
-			apiKey: apiKey,
-			model:  model,
-			http: &http.Client{
-				Timeout: 60 * time.Second,
-			},
+			apiKey:      apiKey,
+			model:       model,
+			http:        client,
+			endpointURL: opt.Endpoint,
+		}, nil
+	case "openai":
+		return &openaiProvider{
+			apiKey:      apiKey,
+			model:       model,
+			http:        client,
+			endpointURL: opt.Endpoint,
 		}, nil
 	default:
-		return nil, fmt.Errorf("provider: unknown %q (supported: anthropic)", name)
+		return nil, fmt.Errorf("provider: unknown %q (supported: anthropic, openai)", name)
 	}
 }
 
 // RedactAPIKey returns a safe-to-log representation of an API key. Use this
 // anywhere a key might end up in logs, error messages, or stderr.
 //
-// Policy (see skeleton.md "알아둘 함정" for rationale):
+// Policy:
 //   - Empty string  → "<unset>"
 //   - Short  (< 8)  → "<redacted>"
 //   - Normal        → first 4 chars + "..." + last 4 chars
-//
-// Tests pin this behaviour in provider_test.go.
 func RedactAPIKey(key string) string {
 	if key == "" {
 		return "<unset>"

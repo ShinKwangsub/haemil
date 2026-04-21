@@ -18,9 +18,10 @@ import (
 
 // Config carries the knobs cmd/haemil/main.go parsed from flags and env.
 type Config struct {
-	ProviderName  string // e.g. "anthropic"
+	ProviderName  string // e.g. "anthropic" or "openai"
 	APIKey        string // raw key, already loaded from env — may be empty
-	Model         string // e.g. "claude-sonnet-4-6"
+	Model         string // e.g. "claude-sonnet-4-6" or "gemma-4-26b-a4b-it-8bit"
+	Endpoint      string // override provider base URL (e.g. http://127.0.0.1:8080 for oMLX)
 	MaxIterations int    // cap on tool loop rounds
 	SessionDir    string // where JSONL session files live
 	ResumeID      string // if non-empty, OpenSession instead of NewSession
@@ -44,7 +45,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	// 1. Provider.
-	p, err := provider.New(cfg.ProviderName, cfg.APIKey, cfg.Model)
+	p, err := provider.New(cfg.ProviderName, cfg.APIKey, cfg.Model, provider.Options{
+		Endpoint: cfg.Endpoint,
+	})
 	if err != nil {
 		return fmt.Errorf("cli: provider: %w", err)
 	}
