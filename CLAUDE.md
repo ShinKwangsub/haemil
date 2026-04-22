@@ -22,12 +22,14 @@
   - **Phase 3 완료** ✅ (2026-04-22) — C1~C8 전부 완료. C9~C16 은 Phase 4 로 이동 (UI / 멀티테넌트 / 에이전트간 통신)
 - **Phase 4 진행 중** — UI / 멀티테넌트 / 에이전트간 통신
   - **C9 멀티테넌트 컨텍스트** ✅ 완료 (2026-04-22) — `runtime.TenantContext` (Workspace + HomeDir) 도입, `memory`/`hooks`/`mcp` 의 `Default*Path` 를 tenant 헬퍼로 centralize, `cli.Config` 에 `Workspace`/`HomeDir`/`TenantID` 필드 추가. 두 tenant 가 동일 프로세스에서 서로 섞이지 않음을 `TestTwoTenantsDoNotCrosstalk` 로 보장.
+  - **7개 reference 플랫폼 Knowledge Graph** ✅ 완료 (2026-04-22) — 각 플랫폼 핵심 서브디렉터리에 대해 graphify 실행. AST + semantic extraction 으로 god-node / community / edges 네비게이션 가능. 산출물: `reference/<platform>/graphify-out/graph.html` (브라우저 열기) + `graph.json` (쿼리) + `GRAPH_REPORT.md`. 사이클 구현 중 "이 플랫폼의 X 패턴 어디 있지?" 에 즉시 답 가능.
 
 **다음 세션 시작 시 읽을 것**:
 1. `CLAUDE.md` (이 파일) — 전체 맥락
 2. `analysis/integration/skeleton.md` — Phase 2 뼈대 스펙 (여전히 유효)
-3. `graphify-out/GRAPH_REPORT.md` — 프로젝트 god nodes + 커뮤니티
-4. `git log --oneline -10` — 최근 사이클 요약
+3. `graphify-out/GRAPH_REPORT.md` — 해밀 프로젝트 자체의 god nodes + 커뮤니티
+4. 해당 사이클 포팅 대상 플랫폼의 `reference/<platform>/graphify-out/GRAPH_REPORT.md` (로컬 전용, gitignored)
+5. `git log --oneline -10` — 최근 사이클 요약
 
 ## 현재 기능 (실제로 돌아감)
 - `./haemil -provider omlx` — 로컬 oMLX (gemma-4) 로 대화 + 도구 사용
@@ -109,6 +111,14 @@
   - hermes/ (777 Python 파일), goose/ (562 Rust 파일)
   - paperclip/ (842 TS 파일), openclaw/ (10,894 TS 파일)
   - autoagent/ (101 Python 파일)
+  - **각 플랫폼 지식 그래프**: `reference/<platform>/graphify-out/graph.html` (브라우저) + `graph.json` (쿼리) + `GRAPH_REPORT.md` (요약). AST 기반이라 코드는 거의 무료, docs 만 semantic 처리. 스코프:
+    - claw-code: 전체 (4,102 nodes / 66 communities) — Rust 엔진 뼈대
+    - autoagent: `autoagent/` 코어 (864 nodes / 27 communities)
+    - paperclip: `server/src/` (1,525 nodes / 64 communities) — **Atomic Checkout / Heartbeat** 검색 가능
+    - hermes: `agent/` 코어 (876 nodes / 30 communities) — `MemoryProvider`, `InsightsEngine` 중심
+    - goose: `crates/goose/` (4,295 nodes / 77 communities) — `Agent` / `ExtensionManager` 중심
+    - goclaw: `internal/store/` (2,020 nodes / 86 communities) — **`TenantIDFromContext` god-node** (C9+C11 레퍼런스 핵심)
+    - openclaw: `src/channels/` (902 nodes / 93 communities) — ChannelPlugin 계약
 
 ## 분석 템플릿 (각 플랫폼 공통)
 1. 개요 (한줄 설명, 언어, 라이선스, Stars)
