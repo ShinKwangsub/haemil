@@ -24,9 +24,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ShinKwangsub/haemil/internal/runtime"
 )
 
 // Event names match the claw-code naming so config files are portable.
@@ -127,14 +128,16 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// DefaultConfigPath returns <cwd>/.haemil/hooks.json. Project-local by
-// default so different projects can have different hooks without crosstalk.
+// DefaultConfigPath returns <workspace>/.haemil/hooks.json. Project-local
+// by default so different projects can have different hooks without
+// crosstalk. Routed through runtime.TenantContext so multi-tenant
+// callers (C9+) can override workspace.
 func DefaultConfigPath() string {
-	cwd, err := os.Getwd()
+	t, err := runtime.ResolveTenant("", "")
 	if err != nil {
 		return "hooks.json"
 	}
-	return filepath.Join(cwd, ".haemil", "hooks.json")
+	return t.HooksConfigPath()
 }
 
 // Runner executes the configured hooks for each event. Zero-value Runner

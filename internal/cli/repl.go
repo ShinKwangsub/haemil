@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/ShinKwangsub/haemil/internal/hooks"
@@ -29,8 +28,15 @@ type Config struct {
 	SessionDir     string // where JSONL session files live
 	ResumeID       string // if non-empty, OpenSession instead of NewSession
 	PermissionMode string // "readonly" | "workspace-write" | "danger-full" (default danger-full)
-	MCPConfigPath  string // path to mcp.json; empty = default (~/.haemil/mcp.json)
-	HooksPath      string // path to hooks.json; empty = default (<cwd>/.haemil/hooks.json)
+	MCPConfigPath  string // path to mcp.json; empty = default (<home>/.haemil/mcp.json)
+	HooksPath      string // path to hooks.json; empty = default (<workspace>/.haemil/hooks.json)
+
+	// C9 multi-tenant hooks. All optional. Empty values fall back to
+	// os.Getwd() / os.UserHomeDir() so single-tenant CLI behaviour is
+	// preserved. Non-empty values MUST be absolute paths.
+	Workspace string // project root (drives MEMORY.md, hooks.json, tool workspace)
+	HomeDir   string // per-user config root (drives USER.md, mcp.json, sessions)
+	TenantID  string // logical tenant label; currently passed through only
 
 	// Stdin / Stdout / Stderr allow tests to inject. If nil, os.Stdin/out/err.
 	Stdin  io.Reader
@@ -50,6 +56,16 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.Stderr = os.Stderr
 	}
 
+	// 0. Tenant context (C9). Resolves workspace + home up front so every
+	// downstream path helper (session, mcp, hooks, memory, tools) flows
+	// from the same pair of roots. Empty Config fields fall back to
+	// os.Getwd() / os.UserHomeDir(), preserving pre-C9 behaviour.
+	tenant, err := runtime.ResolveTenant(cfg.Workspace, cfg.HomeDir)
+	if err != nil {
+		return fmt.Errorf("cli: tenant: %w", err)
+	}
+	tenant.ID = cfg.TenantID
+
 	// 1. Provider.
 	p, err := provider.New(cfg.ProviderName, cfg.APIKey, cfg.Model, provider.Options{
 		Endpoint: cfg.Endpoint,
@@ -60,11 +76,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// 2. Session.
 	if cfg.SessionDir == "" {
-		home, herr := os.UserHomeDir()
-		if herr != nil {
-			return fmt.Errorf("cli: home dir: %w", herr)
-		}
-		cfg.SessionDir = filepath.Join(home, ".haemil", "sessions")
+		cfg.SessionDir = tenant.SessionDir()
 	}
 	var session *runtime.Session
 	if cfg.ResumeID != "" {
@@ -94,8 +106,7 @@ func Run(ctx context.Context, cfg Config) error {
 	policy := runtime.NewPolicy(mode, nil)
 
 	// 4. Tools — bash needs mode + workspace for its validation pipeline.
-	workspace, _ := os.Getwd()
-	toolList := tools.Default(mode, workspace)
+	toolList := tools.Default(mode, tenant.Workspace)
 
 	// 4b. MCP registry (C7). Failures on individual servers are logged and
 	// skipped; a missing config file is fine. The registry's Close is
@@ -103,7 +114,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// the lifetime of the REPL.
 	mcpPath := cfg.MCPConfigPath
 	if mcpPath == "" {
-		mcpPath = mcp.DefaultConfigPath()
+		mcpPath = tenant.MCPConfigPath()
 	}
 	mcpCfg, mcpErr := mcp.LoadConfig(mcpPath)
 	if mcpErr != nil {
@@ -119,7 +130,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// proceeds with no hooks configured.
 	hooksPath := cfg.HooksPath
 	if hooksPath == "" {
-		hooksPath = hooks.DefaultConfigPath()
+		hooksPath = tenant.HooksConfigPath()
 	}
 	hooksCfg, hooksErr := hooks.LoadConfig(hooksPath)
 	if hooksErr != nil {
@@ -129,7 +140,9 @@ func Run(ctx context.Context, cfg Config) error {
 
 	// 4d. Memory (C8). Render the combined user+project memory as a
 	// system-prompt suffix. Missing files are treated as empty (no error).
-	memCtx := memory.NewContext()
+	// Routed through tenant so multi-tenant callers see their own
+	// USER.md/MEMORY.md rather than the single-user defaults.
+	memCtx := memory.NewContextFor(tenant)
 	memBlock, memErr := memCtx.Render()
 	if memErr != nil {
 		fmt.Fprintf(cfg.Stderr, "warning: memory: %v\n", memErr)
@@ -300,10 +313,24 @@ func splitSlashCommand(line string) (head, rest string) {
 	return line, ""
 }
 
+// memoryContextFromConfig builds a memory.Context scoped to the tenant
+// implied by cfg. Empty Workspace/HomeDir fall back to os.Getwd() /
+// os.UserHomeDir() via runtime.ResolveTenant, so single-tenant REPL
+// continues to hit the legacy default paths. Resolution errors fall
+// back to the package-default memory.NewContext() so /memory and
+// /remember stay usable even if tenant paths are unresolvable.
+func memoryContextFromConfig(cfg Config) *memory.Context {
+	t, err := runtime.ResolveTenant(cfg.Workspace, cfg.HomeDir)
+	if err != nil {
+		return memory.NewContext()
+	}
+	return memory.NewContextFor(t)
+}
+
 // handleMemoryShow prints the combined user+project memory. If both are
 // empty the user is told explicitly so they know why nothing loads.
 func handleMemoryShow(cfg Config) {
-	mc := memory.NewContext()
+	mc := memoryContextFromConfig(cfg)
 	userBullets, _ := mc.User.Bullets()
 	projectBullets, _ := mc.Project.Bullets()
 	if len(userBullets) == 0 && len(projectBullets) == 0 {
@@ -333,7 +360,7 @@ func handleRemember(cfg Config, text string, user bool) {
 		fmt.Fprintln(cfg.Stdout, "usage: /remember <text>  (or /remember-user <text>)")
 		return
 	}
-	mc := memory.NewContext()
+	mc := memoryContextFromConfig(cfg)
 	store := mc.Project
 	if user {
 		store = mc.User

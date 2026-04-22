@@ -320,6 +320,98 @@ func TestREPLRememberEmptyShowsUsage(t *testing.T) {
 	}
 }
 
+// TestTwoTenantsDoNotCrosstalk is the C9 acceptance test. Two REPL
+// sessions running back-to-back in the same process against independent
+// Workspace/HomeDir pairs must write to disjoint MEMORY.md / USER.md /
+// session files — no leakage either direction.
+//
+// We drive /remember + /remember-user through runREPL to exercise the
+// full Config → memoryContextFromConfig → runtime.ResolveTenant path.
+func TestTwoTenantsDoNotCrosstalk(t *testing.T) {
+	tenantA := struct{ workspace, home string }{t.TempDir(), t.TempDir()}
+	tenantB := struct{ workspace, home string }{t.TempDir(), t.TempDir()}
+
+	runOne := func(ws, home, projectBullet, userBullet string) {
+		t.Helper()
+		provider := &fakeProvider{responses: []*runtime.ChatResponse{}}
+		sess, err := runtime.NewSession(home + "/.haemil/sessions")
+		if err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		defer sess.Close()
+		rt := runtime.New(provider, nil, sess, runtime.Options{MaxIterations: 10, MaxTokens: 1024})
+
+		stdin := strings.NewReader(
+			"/remember " + projectBullet + "\n" +
+				"/remember-user " + userBullet + "\n" +
+				"/exit\n",
+		)
+		var stdout, stderr bytes.Buffer
+		cfg := Config{
+			Stdin:     stdin,
+			Stdout:    &stdout,
+			Stderr:    &stderr,
+			Workspace: ws,
+			HomeDir:   home,
+		}
+		if err := runREPL(context.Background(), cfg, rt); err != nil {
+			t.Fatalf("runREPL: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "remembered in") {
+			t.Fatalf("expected 'remembered in' confirmation, got %q", stdout.String())
+		}
+	}
+
+	runOne(tenantA.workspace, tenantA.home, "AAA-project-fact", "AAA-user-fact")
+	runOne(tenantB.workspace, tenantB.home, "BBB-project-fact", "BBB-user-fact")
+
+	readFile := func(path string) string {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return string(b)
+	}
+
+	memA := readFile(tenantA.workspace + "/.haemil/MEMORY.md")
+	memB := readFile(tenantB.workspace + "/.haemil/MEMORY.md")
+	usrA := readFile(tenantA.home + "/.haemil/USER.md")
+	usrB := readFile(tenantB.home + "/.haemil/USER.md")
+
+	// Each file must contain its own tenant's bullet and NOT the other.
+	checks := []struct {
+		name string
+		body string
+		want string
+		deny string
+	}{
+		{"tenantA project", memA, "AAA-project-fact", "BBB-project-fact"},
+		{"tenantB project", memB, "BBB-project-fact", "AAA-project-fact"},
+		{"tenantA user", usrA, "AAA-user-fact", "BBB-user-fact"},
+		{"tenantB user", usrB, "BBB-user-fact", "AAA-user-fact"},
+	}
+	for _, c := range checks {
+		if !strings.Contains(c.body, c.want) {
+			t.Errorf("%s missing own bullet %q: body=%q", c.name, c.want, c.body)
+		}
+		if strings.Contains(c.body, c.deny) {
+			t.Errorf("%s leaked other tenant's bullet %q: body=%q", c.name, c.deny, c.body)
+		}
+	}
+
+	// Cross-check the opposing tenant's MEMORY.md file simply shouldn't
+	// exist at tenantA's workspace path with tenantB's content — the
+	// Contains checks above already prove it, but also ensure no
+	// unexpected file appeared at the other tenant's home.
+	if _, err := os.Stat(tenantA.home + "/.haemil/MEMORY.md"); err == nil {
+		t.Errorf("tenantA home should not contain MEMORY.md (project-local lives under workspace)")
+	}
+	if _, err := os.Stat(tenantB.workspace + "/.haemil/USER.md"); err == nil {
+		t.Errorf("tenantB workspace should not contain USER.md (user-global lives under home)")
+	}
+}
+
 // TestREPLUnknownSlash verifies /foo prints unknown-command hint.
 func TestREPLUnknownSlash(t *testing.T) {
 	provider := &fakeProvider{responses: []*runtime.ChatResponse{}}

@@ -20,6 +20,8 @@
   - **C8 메모리** ✅ 완료 (2026-04-22) — USER.md (~/.haemil/) + 프로젝트 MEMORY.md (.haemil/), `/memory` 조회, `/remember` 추가, 시작 시 시스템 프롬프트 주입
   - **C6 Hook** ✅ 완료 (2026-04-22) — Pre/PostToolUse subprocess hook, `.haemil/hooks.json` 설정, deny/modify/append 플로우
   - **Phase 3 완료** ✅ (2026-04-22) — C1~C8 전부 완료. C9~C16 은 Phase 4 로 이동 (UI / 멀티테넌트 / 에이전트간 통신)
+- **Phase 4 진행 중** — UI / 멀티테넌트 / 에이전트간 통신
+  - **C9 멀티테넌트 컨텍스트** ✅ 완료 (2026-04-22) — `runtime.TenantContext` (Workspace + HomeDir) 도입, `memory`/`hooks`/`mcp` 의 `Default*Path` 를 tenant 헬퍼로 centralize, `cli.Config` 에 `Workspace`/`HomeDir`/`TenantID` 필드 추가. 두 tenant 가 동일 프로세스에서 서로 섞이지 않음을 `TestTwoTenantsDoNotCrosstalk` 로 보장.
 
 **다음 세션 시작 시 읽을 것**:
 1. `CLAUDE.md` (이 파일) — 전체 맥락
@@ -39,9 +41,10 @@
 - JSONL 세션 저장 `~/.haemil/sessions/<id>.jsonl` (0700 dir / 0600 file)
 - `-session <id>` 플래그로 이전 세션 replay
 - 슬래시 명령: `/exit`, `/help`, `/compact` (C5), `/memory` + `/remember [-user]` (C8)
+- 멀티테넌트 (C9): `cli.Config.Workspace` + `cli.Config.HomeDir` 로 같은 프로세스에서 tenant 격리 가능 (CLI flag 는 Phase 4 후속)
 
 ## 검증 상태
-- `go build ./...` / `go vet ./...` / `go test ./...` — **143 테스트 PASS / 0 FAIL** (C6 에서 +15)
+- `go build ./...` / `go vet ./...` / `go test ./...` — **150 테스트 PASS / 0 FAIL** (C9 에서 +7)
 - E2E C1~C5 완료: oMLX/gemma4 + 6개 도구 + 권한 모드 + bash 검증 + `/compact` 슬래시
 - E2E C5 완료 (2026-04-22): REPL `/compact` → 임계값 아래일 때 "below threshold" skip 메시지. JSONL marker 라인 replay 는 `TestSessionApplyCompactionRoundtrip` 가 검증
 - 커밋: `79d96fc` (C3), `d28d98b` (C2), `c0dea5d` (C1 file_ops), `8cff014` (OpenAI provider), `7190178` (Phase 2b), `5eec0dd` (docs), `cb7fb66` (Phase 2a), `120f67e` (Graphify), `a1e42d4` (initial)
@@ -64,6 +67,7 @@
   - `conversation.go` — Runtime, Options, TurnSummary, RunTurn (Policy 게이트 내장)
   - `permissions.go` — Capability / PermissionMode / Policy / Authorize (C2)
   - `compact.go` — CompactionConfig / ShouldCompact / Compact + 템플릿 요약 + 쌍 경계 보호 (C5)
+  - `tenant.go` — TenantContext / ResolveTenant / 5개 경로 헬퍼 (C9) — `memory`/`hooks`/`mcp` 의 공통 경로 루트
 - `internal/hooks/` — Pre/Post ToolUse 훅 (C6)
   - `hooks.go` — Config / Runner / HookSpec, subprocess stdin/stdout JSON 계약, deny/modify/append
 - `internal/memory/` — 메모리 (C8)

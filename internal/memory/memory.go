@@ -25,24 +25,29 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ShinKwangsub/haemil/internal/runtime"
 )
 
-// DefaultUserMemoryPath returns ~/.haemil/USER.md.
+// DefaultUserMemoryPath returns <home>/.haemil/USER.md. Routed through
+// runtime.TenantContext so multi-tenant callers (C9+) can override home.
 func DefaultUserMemoryPath() string {
-	home, err := os.UserHomeDir()
+	t, err := runtime.ResolveTenant("", "")
 	if err != nil {
 		return "USER.md"
 	}
-	return filepath.Join(home, ".haemil", "USER.md")
+	return t.UserMemoryPath()
 }
 
-// DefaultProjectMemoryPath returns <cwd>/.haemil/MEMORY.md.
+// DefaultProjectMemoryPath returns <workspace>/.haemil/MEMORY.md. Routed
+// through runtime.TenantContext so multi-tenant callers can override
+// workspace (useful for server mode / isolated per-tenant projects).
 func DefaultProjectMemoryPath() string {
-	cwd, err := os.Getwd()
+	t, err := runtime.ResolveTenant("", "")
 	if err != nil {
 		return "MEMORY.md"
 	}
-	return filepath.Join(cwd, ".haemil", "MEMORY.md")
+	return t.ProjectMemoryPath()
 }
 
 // Store is a single memory file.
@@ -150,11 +155,24 @@ type Context struct {
 	Project *Store
 }
 
-// NewContext returns a Context with the conventional default paths.
+// NewContext returns a Context with the conventional default paths (the
+// current user's home for USER.md, the current working directory for
+// MEMORY.md). Existing single-tenant callers (cmd/haemil/main.go) keep
+// using this.
 func NewContext() *Context {
 	return &Context{
 		User:    NewStore(DefaultUserMemoryPath(), "user"),
 		Project: NewStore(DefaultProjectMemoryPath(), "project"),
+	}
+}
+
+// NewContextFor returns a Context rooted at the given tenant's paths.
+// Used by multi-tenant callers (C9+) who need to resolve memory files
+// against an explicit workspace/home instead of os.Getwd()/UserHomeDir().
+func NewContextFor(t runtime.TenantContext) *Context {
+	return &Context{
+		User:    NewStore(t.UserMemoryPath(), "user"),
+		Project: NewStore(t.ProjectMemoryPath(), "project"),
 	}
 }
 

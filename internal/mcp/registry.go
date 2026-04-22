@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 
 	"github.com/ShinKwangsub/haemil/internal/runtime"
@@ -54,13 +53,15 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// DefaultConfigPath returns ~/.haemil/mcp.json (or the override when set).
+// DefaultConfigPath returns <home>/.haemil/mcp.json (or the override when
+// set). Routed through runtime.TenantContext so multi-tenant callers
+// (C9+) can override home.
 func DefaultConfigPath() string {
-	home, err := os.UserHomeDir()
+	t, err := runtime.ResolveTenant("", "")
 	if err != nil {
 		return "mcp.json"
 	}
-	return filepath.Join(home, ".haemil", "mcp.json")
+	return t.MCPConfigPath()
 }
 
 // Registry owns the live MCP servers and exposes a tool list suitable for
