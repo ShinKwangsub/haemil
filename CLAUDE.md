@@ -23,6 +23,7 @@
 - **Phase 4 진행 중** — UI / 멀티테넌트 / 에이전트간 통신
   - **C9 멀티테넌트 컨텍스트** ✅ 완료 (2026-04-22) — `runtime.TenantContext` (Workspace + HomeDir) 도입, `memory`/`hooks`/`mcp` 의 `Default*Path` 를 tenant 헬퍼로 centralize, `cli.Config` 에 `Workspace`/`HomeDir`/`TenantID` 필드 추가. 두 tenant 가 동일 프로세스에서 서로 섞이지 않음을 `TestTwoTenantsDoNotCrosstalk` 로 보장.
   - **C10 Runtime Supervisor** ✅ 완료 (2026-04-22) — `runtime.Supervisor` 가 N 개 tenant Runtime 을 tenant-당-goroutine 으로 오케스트레이트. 크로스-tenant 병렬, 인트라-tenant 직렬. `quit` signal-only 셧다운 (senders 와 close 레이스 없음). `TestSupervisorTwoTenantsNoCrosstalkRace` + `TestSupervisorIntraTenantSerialization` 가 `-race -count=5` 에서 clean. C12 이벤트 버스 / C16 serve 모드의 전제 dispatch 레이어.
+  - **C12 DomainEventBus** ✅ 완료 (2026-04-22) — `runtime.EventBus` 인메모리 pub/sub (fire-and-forget, per-subscriber FIFO, slow-consumer drop). Supervisor 가 `RegisterOpts.EventBus` 받으면 각 RunTurn 완료마다 `turn.completed` 이벤트 자동 발행. Filter 는 subscriber 쪽, panic-safe. 에이전트 A 완료를 B 가 구독으로 관찰 가능 → multi-agent 협업의 얇은 뼈대.
   - **7개 reference 플랫폼 Knowledge Graph** ✅ 완료 (2026-04-22) — 각 플랫폼 핵심 서브디렉터리에 대해 graphify 실행. AST + semantic extraction 으로 god-node / community / edges 네비게이션 가능. 산출물: `reference/<platform>/graphify-out/graph.html` (브라우저 열기) + `graph.json` (쿼리) + `GRAPH_REPORT.md`. 사이클 구현 중 "이 플랫폼의 X 패턴 어디 있지?" 에 즉시 답 가능.
 
 **다음 세션 시작 시 읽을 것**:
@@ -47,7 +48,7 @@
 - 멀티테넌트 (C9): `cli.Config.Workspace` + `cli.Config.HomeDir` 로 같은 프로세스에서 tenant 격리 가능 (CLI flag 는 Phase 4 후속)
 
 ## 검증 상태
-- `go build ./...` / `go vet ./...` / `go test ./...` — **157 테스트 PASS / 0 FAIL** (C10 에서 +7), `go test -race` clean
+- `go build ./...` / `go vet ./...` / `go test ./...` — **166 테스트 PASS / 0 FAIL** (C12 에서 +9), `go test -race -count=5` clean
 - E2E C1~C5 완료: oMLX/gemma4 + 6개 도구 + 권한 모드 + bash 검증 + `/compact` 슬래시
 - E2E C5 완료 (2026-04-22): REPL `/compact` → 임계값 아래일 때 "below threshold" skip 메시지. JSONL marker 라인 replay 는 `TestSessionApplyCompactionRoundtrip` 가 검증
 - 커밋: `79d96fc` (C3), `d28d98b` (C2), `c0dea5d` (C1 file_ops), `8cff014` (OpenAI provider), `7190178` (Phase 2b), `5eec0dd` (docs), `cb7fb66` (Phase 2a), `120f67e` (Graphify), `a1e42d4` (initial)
@@ -71,7 +72,8 @@
   - `permissions.go` — Capability / PermissionMode / Policy / Authorize (C2)
   - `compact.go` — CompactionConfig / ShouldCompact / Compact + 템플릿 요약 + 쌍 경계 보호 (C5)
   - `tenant.go` — TenantContext / ResolveTenant / 5개 경로 헬퍼 (C9) — `memory`/`hooks`/`mcp` 의 공통 경로 루트
-  - `supervisor.go` — Supervisor / supervisedAgent, 테넌트별 goroutine + signal-only 셧다운 (C10)
+  - `supervisor.go` — Supervisor / supervisedAgent, 테넌트별 goroutine + signal-only 셧다운 (C10) + `turn.completed` 이벤트 발행 (C12)
+  - `eventbus.go` — EventBus / Event / Subscription / Filter, 인메모리 fire-and-forget pub/sub (C12)
 - `internal/hooks/` — Pre/Post ToolUse 훅 (C6)
   - `hooks.go` — Config / Runner / HookSpec, subprocess stdin/stdout JSON 계약, deny/modify/append
 - `internal/memory/` — 메모리 (C8)

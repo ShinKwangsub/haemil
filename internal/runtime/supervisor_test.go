@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -300,6 +301,100 @@ func TestSupervisorTwoTenantsNoCrosstalkRace(t *testing.T) {
 	if got := atomic.LoadInt32(&provB.callN); got != N {
 		t.Errorf("provB calls: %d, want %d", got, N)
 	}
+}
+
+// TestSupervisorEmitsTurnCompleted: two tenants share an EventBus; a
+// subscriber filtering on tenantID="alpha" observes alpha's
+// turn.completed events only, with matching input echoed in the
+// payload. Proves C12 Supervisor → EventBus wiring end-to-end.
+func TestSupervisorEmitsTurnCompleted(t *testing.T) {
+	bus := NewEventBus()
+	defer bus.Close()
+
+	sup := NewSupervisor()
+	defer sup.Close(context.Background())
+
+	rtA := mkRuntime(t, &supFakeProvider{name: "A"})
+	rtB := mkRuntime(t, &supFakeProvider{name: "B"})
+	tenA := TenantContext{ID: "alpha", Workspace: t.TempDir(), HomeDir: t.TempDir()}
+	tenB := TenantContext{ID: "beta", Workspace: t.TempDir(), HomeDir: t.TempDir()}
+
+	if err := sup.Register(tenA, rtA, RegisterOpts{QueueSize: 4, EventBus: bus}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sup.Register(tenB, rtB, RegisterOpts{QueueSize: 4, EventBus: bus}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Subscribe: only alpha's turn.completed events.
+	sub := bus.Subscribe(16, func(e Event) bool {
+		return e.Type == TurnCompletedEventType && e.TenantID == "alpha"
+	})
+	defer bus.Unsubscribe(sub)
+
+	// Dispatch 3 turns on alpha and 3 on beta. Subscriber must see
+	// exactly alpha's 3.
+	inputsA := []string{"a-1", "a-2", "a-3"}
+	inputsB := []string{"b-1", "b-2", "b-3"}
+	for _, in := range inputsA {
+		if _, err := sup.RunTurn(context.Background(), "alpha", in); err != nil {
+			t.Fatalf("alpha RunTurn: %v", err)
+		}
+	}
+	for _, in := range inputsB {
+		if _, err := sup.RunTurn(context.Background(), "beta", in); err != nil {
+			t.Fatalf("beta RunTurn: %v", err)
+		}
+	}
+
+	// Collect up to 3 events with a deadline.
+	got := make([]Event, 0, 3)
+	deadline := time.After(1 * time.Second)
+	for len(got) < 3 {
+		select {
+		case e := <-sub.C:
+			got = append(got, e)
+		case <-deadline:
+			t.Fatalf("timed out: received %d events, want 3", len(got))
+		}
+	}
+
+	// Inspect payloads — each should decode as TurnCompletedPayload
+	// with matching input and tenant alpha.
+	for i, e := range got {
+		if e.TenantID != "alpha" {
+			t.Errorf("event %d TenantID: got %q, want alpha", i, e.TenantID)
+		}
+		if e.Type != TurnCompletedEventType {
+			t.Errorf("event %d Type: got %q", i, e.Type)
+		}
+		var p TurnCompletedPayload
+		if err := decodePayload(e.Payload, &p); err != nil {
+			t.Errorf("event %d payload decode: %v", i, err)
+			continue
+		}
+		if p.TenantID != "alpha" {
+			t.Errorf("event %d payload tenantID: %q", i, p.TenantID)
+		}
+		if p.Input != inputsA[i] {
+			t.Errorf("event %d input: got %q, want %q", i, p.Input, inputsA[i])
+		}
+		if p.StopReason != "end_turn" {
+			t.Errorf("event %d stop: %q", i, p.StopReason)
+		}
+	}
+
+	// And no beta events leaked.
+	select {
+	case e := <-sub.C:
+		t.Errorf("leaked beta event: %+v", e)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// decodePayload is a tiny helper — json.Unmarshal on a RawMessage.
+func decodePayload(raw []byte, out interface{}) error {
+	return json.Unmarshal(raw, out)
 }
 
 // TestSupervisorIntraTenantSerialization: 50 goroutines fire RunTurn on

@@ -2,10 +2,12 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ErrSupervisorClosed is returned by RunTurn / Register when the
@@ -52,6 +54,7 @@ type supervisedAgent struct {
 	jobs   chan supervisorJob
 	quit   chan struct{}
 	done   chan struct{}
+	bus    *EventBus // C12: optional; nil means don't publish lifecycle events
 }
 
 // supervisorJob is one RunTurn request travelling from Supervisor.RunTurn
@@ -76,6 +79,12 @@ type RegisterOpts struct {
 	// A larger queue lets bursty callers fire and forget; Supervisor does
 	// not drop jobs, only the receiving goroutine does — be conservative.
 	QueueSize int
+
+	// EventBus, if non-nil, receives a "turn.completed" event after
+	// every RunTurn this tenant processes. The bus is NOT owned by
+	// Supervisor — the caller shares it across tenants / subsystems
+	// and is responsible for Close()ing it. C12.
+	EventBus *EventBus
 }
 
 // NewSupervisor returns a ready-to-use Supervisor with no tenants
@@ -120,6 +129,7 @@ func (s *Supervisor) Register(tenant TenantContext, rt *Runtime, opts RegisterOp
 		jobs:   make(chan supervisorJob, queue),
 		quit:   make(chan struct{}),
 		done:   make(chan struct{}),
+		bus:    opts.EventBus,
 	}
 	s.agents[tenant.ID] = agent
 	s.wg.Add(1)
@@ -267,6 +277,53 @@ func (a *supervisedAgent) run() {
 		case job := <-a.jobs:
 			summary, err := a.rt.RunTurn(job.ctx, job.input)
 			job.result <- supervisorResult{summary: summary, err: err}
+			if a.bus != nil {
+				a.publishTurnCompleted(job.input, summary, err)
+			}
 		}
 	}
+}
+
+// TurnCompletedPayload is the JSON shape of the "turn.completed" event
+// published on RegisterOpts.EventBus after every RunTurn. Stable
+// contract — subscribers decode against this struct.
+type TurnCompletedPayload struct {
+	TenantID   string       `json:"tenant_id"`
+	Input      string       `json:"input"`
+	Summary    *TurnSummary `json:"summary,omitempty"` // nil when Err non-empty
+	Err        string       `json:"error,omitempty"`
+	Iterations int          `json:"iterations"`
+	StopReason string       `json:"stop_reason,omitempty"`
+}
+
+// TurnCompletedEventType is the canonical Type string for turn
+// completion events. Subscribers filter on this.
+const TurnCompletedEventType = "turn.completed"
+
+// publishTurnCompleted best-effort serialises a turn's outcome and
+// publishes it. Marshal errors downgrade to an event with only the
+// error text — we never drop the event silently (observability first).
+func (a *supervisedAgent) publishTurnCompleted(input string, summary *TurnSummary, runErr error) {
+	payload := TurnCompletedPayload{
+		TenantID: a.tenant.ID,
+		Input:    input,
+		Summary:  summary,
+	}
+	if runErr != nil {
+		payload.Err = runErr.Error()
+	}
+	if summary != nil {
+		payload.Iterations = summary.Iterations
+		payload.StopReason = summary.StopReason
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		body = []byte(fmt.Sprintf(`{"tenant_id":%q,"marshal_error":%q}`, a.tenant.ID, err.Error()))
+	}
+	a.bus.Publish(Event{
+		TenantID: a.tenant.ID,
+		Type:     TurnCompletedEventType,
+		Payload:  body,
+		At:       time.Now(),
+	})
 }
