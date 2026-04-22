@@ -25,6 +25,7 @@
   - **C10 Runtime Supervisor** ✅ 완료 (2026-04-22) — `runtime.Supervisor` 가 N 개 tenant Runtime 을 tenant-당-goroutine 으로 오케스트레이트. 크로스-tenant 병렬, 인트라-tenant 직렬. `quit` signal-only 셧다운 (senders 와 close 레이스 없음). `TestSupervisorTwoTenantsNoCrosstalkRace` + `TestSupervisorIntraTenantSerialization` 가 `-race -count=5` 에서 clean. C12 이벤트 버스 / C16 serve 모드의 전제 dispatch 레이어.
   - **C12 DomainEventBus** ✅ 완료 (2026-04-22) — `runtime.EventBus` 인메모리 pub/sub (fire-and-forget, per-subscriber FIFO, slow-consumer drop). Supervisor 가 `RegisterOpts.EventBus` 받으면 각 RunTurn 완료마다 `turn.completed` 이벤트 자동 발행. Filter 는 subscriber 쪽, panic-safe. 에이전트 A 완료를 B 가 구독으로 관찰 가능 → multi-agent 협업의 얇은 뼈대.
   - **C16 Serve Mode** ✅ 완료 (2026-04-22) — `./haemil -serve -addr 127.0.0.1:8080` 으로 HTTP 엔드포인트 3개: `POST /v1/turn` (Supervisor.RunTurn 동기 호출), `GET /v1/events` (SSE 스트림, EventBus 구독), `GET /healthz`. 비로컬 바인딩 시 stderr 경고 (auth 없음). cli.Run 과 server.Run 이 `cli.BuildRuntime` wiring helper 공유.
+  - **C11 Multi-Tenant Store** ✅ 완료 (2026-04-22) — `internal/store` SQLite DAL. `TenantIDFromContext` / `WithTenantID` / `MustTenantIDFromContext` 가 goclaw god-node 패턴 그대로 포팅. `Dialect` 인터페이스 (SQLite 구현, Postgres 예비). 첫 소비자 `EventLog` append-only 테이블 — `TestEventLogTenantIsolation` 가 두 tenant 가 같은 DB 에 써도 크로스토크 0 임을 증명. `modernc.org/sqlite` (CGO-free). C13 Outbox / C14 task store 의 뼈대.
   - **7개 reference 플랫폼 Knowledge Graph** ✅ 완료 (2026-04-22) — 각 플랫폼 핵심 서브디렉터리에 대해 graphify 실행. AST + semantic extraction 으로 god-node / community / edges 네비게이션 가능. 산출물: `reference/<platform>/graphify-out/graph.html` (브라우저 열기) + `graph.json` (쿼리) + `GRAPH_REPORT.md`. 사이클 구현 중 "이 플랫폼의 X 패턴 어디 있지?" 에 즉시 답 가능.
 
 **다음 세션 시작 시 읽을 것**:
@@ -50,7 +51,7 @@
 - 멀티테넌트 (C9): `cli.Config.Workspace` + `cli.Config.HomeDir` 로 같은 프로세스에서 tenant 격리 가능 (CLI flag 는 Phase 4 후속)
 
 ## 검증 상태
-- `go build ./...` / `go vet ./...` / `go test ./...` — **174 테스트 PASS / 0 FAIL** (C16 에서 +8), `go test -race` clean (runtime + server)
+- `go build ./...` / `go vet ./...` / `go test ./...` — **193 테스트 PASS / 0 FAIL** (C11 에서 +19), `go test -race` clean (runtime + server + store)
 - E2E C1~C5 완료: oMLX/gemma4 + 6개 도구 + 권한 모드 + bash 검증 + `/compact` 슬래시
 - E2E C5 완료 (2026-04-22): REPL `/compact` → 임계값 아래일 때 "below threshold" skip 메시지. JSONL marker 라인 replay 는 `TestSessionApplyCompactionRoundtrip` 가 검증
 - 커밋: `79d96fc` (C3), `d28d98b` (C2), `c0dea5d` (C1 file_ops), `8cff014` (OpenAI provider), `7190178` (Phase 2b), `5eec0dd` (docs), `cb7fb66` (Phase 2a), `120f67e` (Graphify), `a1e42d4` (initial)
@@ -60,7 +61,7 @@
 - 웹 UI: React
 - 데스크탑: Tauri (Go + React)
 - 모바일: React Native
-- DB: PostgreSQL (RLS 멀티테넌트)
+- DB: PostgreSQL (RLS 멀티테넌트) — **MVP/로컬은 SQLite (modernc.org/sqlite, CGO-free)**. PG 는 `store.Dialect` 인터페이스만 뚫어둠 (C11), 실제 드라이버는 이후 사이클.
 - 세션 저장: JSONL (append-only)
 
 ## 디렉토리 구조
@@ -103,6 +104,12 @@
   - `wire.go` — BuildRuntime helper (C16) — cli/server 가 공유하는 provider/session/tools/policy/hooks/mcp/memory 와이어링
 - `internal/server/` — HTTP 서버 (C16)
   - `server.go` — Run(ctx, cfg), `POST /v1/turn` / `GET /v1/events` SSE / `GET /healthz`, Supervisor + EventBus 뒤, graceful shutdown
+- `internal/store/` — 멀티테넌트 SQLite DAL (C11)
+  - `dialect.go` — Dialect 인터페이스 + SQLite 구현 (PG 예비)
+  - `tenant.go` — WithTenantID / TenantIDFromContext / MustTenantIDFromContext (goclaw god-node 포팅)
+  - `store.go` — Open / Migrate / Close (DSN `sqlite://path`, MaxOpenConns=1 로 busy 회피)
+  - `migrations.go` — embedded DDL (event_log 테이블)
+  - `eventlog.go` — 첫 소비자: append-only 이벤트 로그, tenant-scoped Since/CountAll
 
 **임포트 그래프**: `main → cli → runtime/provider/tools`. provider, tools 는 둘 다 runtime 을 쓰지만 **서로는 모른다**.
 
