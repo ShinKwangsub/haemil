@@ -13,6 +13,7 @@ import (
 
 	"github.com/ShinKwangsub/haemil/internal/cli"
 	"github.com/ShinKwangsub/haemil/internal/provider"
+	"github.com/ShinKwangsub/haemil/internal/server"
 )
 
 func main() {
@@ -26,6 +27,9 @@ func main() {
 		permissionMode = flag.String("permission-mode", "danger-full", "tool permission preset: readonly | workspace-write | danger-full")
 		mcpConfigPath  = flag.String("mcp-config", "", "path to mcp.json (default ~/.haemil/mcp.json)")
 		hooksPath      = flag.String("hooks", "", "path to hooks.json (default <cwd>/.haemil/hooks.json)")
+		serveMode      = flag.Bool("serve", false, "run as HTTP server (POST /v1/turn, GET /v1/events SSE) instead of REPL")
+		serveAddr      = flag.String("addr", "127.0.0.1:8080", "HTTP bind address (only used with -serve)")
+		tenantID       = flag.String("tenant-id", "", "logical tenant label; empty = 'default' in server mode, passthrough in CLI")
 	)
 	flag.Parse()
 
@@ -93,10 +97,18 @@ func main() {
 		PermissionMode: *permissionMode,
 		MCPConfigPath:  *mcpConfigPath,
 		HooksPath:      *hooksPath,
+		TenantID:       *tenantID,
+		Addr:           *serveAddr,
 	}
 
-	if err := cli.Run(ctx, cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "haemil: %v\n", err)
+	var runErr error
+	if *serveMode {
+		runErr = server.Run(ctx, cfg)
+	} else {
+		runErr = cli.Run(ctx, cfg)
+	}
+	if runErr != nil {
+		fmt.Fprintf(os.Stderr, "haemil: %v\n", runErr)
 		os.Exit(1)
 	}
 }

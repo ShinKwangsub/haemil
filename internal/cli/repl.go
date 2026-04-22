@@ -10,12 +10,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ShinKwangsub/haemil/internal/hooks"
-	"github.com/ShinKwangsub/haemil/internal/mcp"
 	"github.com/ShinKwangsub/haemil/internal/memory"
-	"github.com/ShinKwangsub/haemil/internal/provider"
 	"github.com/ShinKwangsub/haemil/internal/runtime"
-	"github.com/ShinKwangsub/haemil/internal/tools"
 )
 
 // Config carries the knobs cmd/haemil/main.go parsed from flags and env.
@@ -38,6 +34,10 @@ type Config struct {
 	HomeDir   string // per-user config root (drives USER.md, mcp.json, sessions)
 	TenantID  string // logical tenant label; currently passed through only
 
+	// C16 server mode (only consulted when cmd/haemil/main.go dispatches
+	// to internal/server.Run instead of cli.Run).
+	Addr string // HTTP bind address, e.g. "127.0.0.1:8080"
+
 	// Stdin / Stdout / Stderr allow tests to inject. If nil, os.Stdin/out/err.
 	Stdin  io.Reader
 	Stdout io.Writer
@@ -45,6 +45,8 @@ type Config struct {
 }
 
 // Run wires up provider + session + runtime + tools and runs the REPL loop.
+// The wiring itself is extracted into BuildRuntime (wire.go) so server
+// mode (internal/server) can share the same construction logic.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.Stdin == nil {
 		cfg.Stdin = os.Stdin
@@ -56,126 +58,39 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.Stderr = os.Stderr
 	}
 
-	// 0. Tenant context (C9). Resolves workspace + home up front so every
-	// downstream path helper (session, mcp, hooks, memory, tools) flows
-	// from the same pair of roots. Empty Config fields fall back to
-	// os.Getwd() / os.UserHomeDir(), preserving pre-C9 behaviour.
-	tenant, err := runtime.ResolveTenant(cfg.Workspace, cfg.HomeDir)
+	br, cleanup, err := BuildRuntime(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("cli: tenant: %w", err)
+		return err
 	}
-	tenant.ID = cfg.TenantID
+	defer cleanup()
 
-	// 1. Provider.
-	p, err := provider.New(cfg.ProviderName, cfg.APIKey, cfg.Model, provider.Options{
-		Endpoint: cfg.Endpoint,
-	})
-	if err != nil {
-		return fmt.Errorf("cli: provider: %w", err)
-	}
-
-	// 2. Session.
-	if cfg.SessionDir == "" {
-		cfg.SessionDir = tenant.SessionDir()
-	}
-	var session *runtime.Session
-	if cfg.ResumeID != "" {
-		session, err = runtime.OpenSession(cfg.SessionDir, cfg.ResumeID)
-	} else {
-		session, err = runtime.NewSession(cfg.SessionDir)
-	}
-	if err != nil {
-		return fmt.Errorf("cli: session: %w", err)
-	}
+	// CLI owns session lifecycle (unlike server mode where Supervisor
+	// does). Close it after REPL exits.
+	session := br.Runtime.Session()
 	defer func() {
+		if session == nil {
+			return
+		}
 		if cerr := session.Close(); cerr != nil {
 			fmt.Fprintf(cfg.Stderr, "warning: closing session: %v\n", cerr)
 		}
 	}()
 
-	// 3. Policy (C2 권한 모드) — parsed first so we can wire it into tool
-	// constructors (C3 bash_validation needs the active mode).
-	modeStr := cfg.PermissionMode
-	if modeStr == "" {
-		modeStr = "danger-full"
-	}
-	mode, err := runtime.ParseMode(modeStr)
-	if err != nil {
-		return fmt.Errorf("cli: permission-mode: %w", err)
-	}
-	policy := runtime.NewPolicy(mode, nil)
-
-	// 4. Tools — bash needs mode + workspace for its validation pipeline.
-	toolList := tools.Default(mode, tenant.Workspace)
-
-	// 4b. MCP registry (C7). Failures on individual servers are logged and
-	// skipped; a missing config file is fine. The registry's Close is
-	// deferred to this function's return so long-lived servers live for
-	// the lifetime of the REPL.
-	mcpPath := cfg.MCPConfigPath
-	if mcpPath == "" {
-		mcpPath = tenant.MCPConfigPath()
-	}
-	mcpCfg, mcpErr := mcp.LoadConfig(mcpPath)
-	if mcpErr != nil {
-		fmt.Fprintf(cfg.Stderr, "warning: mcp config: %v\n", mcpErr)
-	}
-	mcpReg := mcp.BootstrapFromConfig(ctx, mcpCfg)
-	defer mcpReg.Close()
-	if len(mcpReg.Tools) > 0 {
-		toolList = append(toolList, mcpReg.Tools...)
-	}
-
-	// 4c. Hooks (C6). Missing config is fine; invalid config warns and
-	// proceeds with no hooks configured.
-	hooksPath := cfg.HooksPath
-	if hooksPath == "" {
-		hooksPath = tenant.HooksConfigPath()
-	}
-	hooksCfg, hooksErr := hooks.LoadConfig(hooksPath)
-	if hooksErr != nil {
-		fmt.Fprintf(cfg.Stderr, "warning: hooks config: %v\n", hooksErr)
-	}
-	hookRunner := hooks.NewRunner(hooksCfg)
-
-	// 4d. Memory (C8). Render the combined user+project memory as a
-	// system-prompt suffix. Missing files are treated as empty (no error).
-	// Routed through tenant so multi-tenant callers see their own
-	// USER.md/MEMORY.md rather than the single-user defaults.
-	memCtx := memory.NewContextFor(tenant)
-	memBlock, memErr := memCtx.Render()
-	if memErr != nil {
-		fmt.Fprintf(cfg.Stderr, "warning: memory: %v\n", memErr)
-	}
-	effectiveSystem := systemPrompt
-	if memBlock != "" {
-		effectiveSystem = systemPrompt + "\n\n" + memBlock
-	}
-
-	// 5. Runtime.
-	rt := runtime.New(p, toolList, session, runtime.Options{
-		Model:         cfg.Model,
-		MaxIterations: cfg.MaxIterations,
-		SystemPrompt:  effectiveSystem,
-		MaxTokens:     4096,
-		Policy:        policy,
-		Hooks:         hookRunner,
-	})
-
-	// 6. Greeting + REPL.
-	fmt.Fprintf(cfg.Stdout, "haemil — Phase 2b REPL (session %s, mode %s)\n", session.ID(), mode)
-	if len(mcpReg.Servers) > 0 {
+	// Greeting.
+	fmt.Fprintf(cfg.Stdout, "haemil — Phase 2b REPL (session %s, mode %s)\n",
+		session.ID(), br.Mode)
+	if len(br.MCPRegistry.Servers) > 0 {
 		fmt.Fprintf(cfg.Stdout, "mcp: %d server(s) connected, %d tool(s) registered\n",
-			len(mcpReg.Servers), len(mcpReg.Tools))
+			len(br.MCPRegistry.Servers), len(br.MCPRegistry.Tools))
 	}
-	if hookRunner.Enabled() {
+	if br.HooksRunner.Enabled() {
 		fmt.Fprintf(cfg.Stdout, "hooks: %d pre + %d post loaded from %s\n",
-			len(hooksCfg.PreToolUse), len(hooksCfg.PostToolUse), hooksPath)
+			len(br.HooksConfig.PreToolUse), len(br.HooksConfig.PostToolUse), br.HooksPath)
 	}
 	fmt.Fprintln(cfg.Stdout, "type /exit to quit, /help for commands")
 	fmt.Fprintln(cfg.Stdout)
 
-	return runREPL(ctx, cfg, rt)
+	return runREPL(ctx, cfg, br.Runtime)
 }
 
 // systemPrompt is the fixed system prompt for Phase 2. Phase 3 will
